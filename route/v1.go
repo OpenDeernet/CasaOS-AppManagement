@@ -82,6 +82,12 @@ func InitV1Router() http.Handler {
 			// v1ContainerGroup.PUT("/:id/state", v1.ChangAppState) // /app/state/:id
 			v1ContainerGroup.DELETE("/:id", v1.UninstallApp) // app/uninstall/:id
 
+			// where Docker's data is, and moving it: before /:id, which would take them
+			v1ContainerGroup.GET("/docker-location", v1.GetDockerLocation)
+			v1ContainerGroup.GET("/docker-location/check", v1.CheckDockerLocation)
+			v1ContainerGroup.POST("/docker-location", v1.MoveDockerLocation)
+			v1ContainerGroup.DELETE("/docker-location/old", v1.DeleteDockerLocationOldCopy)
+
 			// v1ContainerGroup.GET("/info", v1.GetDockerDaemonConfiguration)
 			// v1ContainerGroup.PUT("/info", v1.PutDockerDaemonConfiguration)
 		}
