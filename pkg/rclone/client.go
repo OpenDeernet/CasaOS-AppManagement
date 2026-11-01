@@ -31,10 +31,10 @@ import (
 // SocketPath is where the unit file puts the daemon's socket.
 const SocketPath = "/var/run/rclone/rclone.sock"
 
-// RawSuffix marks the remote underneath an encrypted destination: the bucket or
-// the server itself, which holds only ciphertext and is never listed as a
-// destination in its own right. A name ending in it is refused, so the two can
-// always be told apart.
+// RawSuffix marks the remote underneath a destination that has a root or is
+// encrypted: the bucket or the server itself (which, when encrypted, holds only
+// ciphertext), never listed as a destination in its own right. A name ending in it
+// is refused, so the two can always be told apart.
 const RawSuffix = "-raw"
 
 // DestinationPrefix marks a remote as one of ours.
@@ -136,14 +136,57 @@ func (c *Client) Destinations() ([]string, error) {
 // are that backend's own options. Neither is interpreted here: rclone validates
 // them, rclone knows what each backend needs, and a list of required fields
 // maintained on this side would go stale the first time rclone gained an option.
-func (c *Client) CreateDestination(name, backend string, parameters map[string]string) error {
+//
+// `root` is where on the backend everything is put, handed to rclone as it is: a
+// folder, or for an object store the bucket (rclone has no bucket option; the
+// first folder of a path is the bucket, which left to itself is named after the
+// app, and a name at a provider such as AWS belongs to whoever took it first).
+// Empty, the destination is the backend's own root.
+func (c *Client) CreateDestination(name, backend, root string, parameters map[string]string) error {
+	if err := checkDestination(name, backend); err != nil {
+		return err
+	}
+
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return c.createRemote(name, backend, parameters)
+	}
+
+	if err := c.createRemote(name+RawSuffix, backend, parameters); err != nil {
+		return err
+	}
+
+	// An alias is a name for a place inside another remote: everything else in this
+	// package talks to it and never knows the difference.
+	if err := c.createRemoteOf(name, "alias", map[string]string{"remote": rawRemote(name, root)}, nil); err != nil {
+		_ = c.DeleteDestination(name)
+
+		return err
+	}
+
+	return nil
+}
+
+func checkDestination(name, backend string) error {
 	if name == "" {
 		return errors.New("a destination needs a name")
+	}
+	if strings.HasSuffix(name, RawSuffix) {
+		return fmt.Errorf("a destination's name cannot end in %q", RawSuffix)
 	}
 	if backend == "" {
 		return errors.New("a destination needs a backend, such as s3, sftp or ftp")
 	}
 
+	return nil
+}
+
+// rawRemote is the root on the remote underneath the destination called name.
+func rawRemote(name, root string) string {
+	return DestinationPrefix + name + RawSuffix + ":" + root
+}
+
+func (c *Client) createRemote(name, backend string, parameters map[string]string) error {
 	// A backend that signs in through a browser (onedrive, drive, dropbox) is given
 	// the token rclone authorize printed elsewhere. Asked to refresh it, which is
 	// its default, rclone starts its own sign-in and waits for a browser this box
@@ -155,16 +198,24 @@ func (c *Client) CreateDestination(name, backend string, parameters map[string]s
 		}
 	}
 
+	return c.createRemoteOf(name, backend, parameters, nil)
+}
+
+// createRemoteOf asks rclone for the remote called name (without the prefix).
+func (c *Client) createRemoteOf(name, backend string, parameters map[string]string, extra map[string]string) error {
 	encoded, err := json.Marshal(parameters)
 	if err != nil {
 		return err
 	}
 
-	return c.call("/config/create", map[string]string{
+	call := map[string]string{
 		"name":       DestinationPrefix + name,
 		"type":       backend,
 		"parameters": string(encoded),
-	}, nil)
+	}
+	maps.Copy(call, extra)
+
+	return c.call("/config/create", call, nil)
 }
 
 // DeleteDestination forgets a destination and its credentials. Whatever was
@@ -205,9 +256,20 @@ type DestinationSpace struct {
 func (c *Client) CheckDestination(name string) (DestinationSpace, error) {
 	var space DestinationSpace
 
-	err := c.call("/operations/about", map[string]string{
-		"fs": DestinationPrefix + name + ":",
-	}, &space)
+	fs := DestinationPrefix + name + ":"
+
+	err := c.call("/operations/about", map[string]string{"fs": fs}, &space)
+	if err != nil && strings.Contains(err.Error(), "doesn't support about") {
+		// S3 answers an error here, not an empty space: it has no About at all. Whether the
+		// destination can be reached is then what listing its root says, and no space is told.
+		err = c.call("/operations/list", map[string]string{"fs": fs, "remote": ""}, nil)
+		if err != nil && strings.Contains(err.Error(), "directory not found") {
+			// a root typed by hand: this is the typo, or the bucket not made yet
+			err = fmt.Errorf("the bucket or folder of this destination does not exist (%w)", err)
+		}
+
+		return DestinationSpace{}, err
+	}
 
 	return space, err
 }
@@ -221,23 +283,20 @@ func (c *Client) CheckDestination(name string) (DestinationSpace, error) {
 // holds ciphertext it cannot read. The password is obscured by rclone into its
 // config the way it obscures every password it keeps, and is not readable back
 // through this API.
-func (c *Client) CreateEncryptedDestination(name, backend string, parameters map[string]string, password string) error {
-	if name == "" {
-		return errors.New("a destination needs a name")
-	}
-	if strings.HasSuffix(name, RawSuffix) {
-		return fmt.Errorf("a destination's name cannot end in %q", RawSuffix)
+func (c *Client) CreateEncryptedDestination(name, backend, root string, parameters map[string]string, password string) error {
+	if err := checkDestination(name, backend); err != nil {
+		return err
 	}
 	if password == "" {
 		return errors.New("an encrypted destination needs a password")
 	}
 
-	if err := c.CreateDestination(name+RawSuffix, backend, parameters); err != nil {
+	if err := c.createRemote(name+RawSuffix, backend, parameters); err != nil {
 		return err
 	}
 
 	encoded, err := json.Marshal(map[string]string{
-		"remote":   DestinationPrefix + name + RawSuffix + ":",
+		"remote":   rawRemote(name, strings.TrimSpace(root)),
 		"password": password,
 	})
 	if err != nil {
@@ -252,7 +311,7 @@ func (c *Client) CreateEncryptedDestination(name, backend string, parameters map
 	}, nil); err != nil {
 		// half a destination is worse than none: the raw remote alone would be
 		// listed by nothing and reachable by anything
-		_ = c.DeleteDestination(name + RawSuffix)
+		_ = c.DeleteDestination(name)
 
 		return err
 	}

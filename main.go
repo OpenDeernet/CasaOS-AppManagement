@@ -174,6 +174,16 @@ func main() {
 			panic(err)
 		}
 
+		// The repositories kept with restic, looked at once a week. An hour because that is how
+		// soon a check that found a fault, or a destination just switched, is picked up; what is
+		// not due costs one file read.
+		resticChecker := service.NewResticChecker()
+		if _, err := crontab.AddFunc("@every 1h", func() {
+			service.RunDueResticChecks(ctx, time.Now(), resticChecker)
+		}); err != nil {
+			panic(err)
+		}
+
 		// An app's container that crashes, turns unhealthy or keeps restarting, told on
 		// the message bus for the core's alerts. Docker's own events rather than a tick:
 		// a crash is news the moment it happens.

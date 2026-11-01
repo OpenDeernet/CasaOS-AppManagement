@@ -885,6 +885,81 @@ paths:
         "500":
           $ref: "#/components/responses/ResponseInternalServerError"
 
+  /backup/destinations/{name}/restic:
+    get:
+      summary: Whether a destination keeps its backups with restic
+      description: |
+        `available` is whether the restic program is on this box; `enabled` is
+        whether this destination has been switched to it. `last_check` is how the
+        last check of its repository went, once there has been one.
+      operationId: backupDestinationRestic
+      tags:
+        - Backup methods
+      parameters:
+        - $ref: "#/components/parameters/BackupDestinationName"
+      responses:
+        "200":
+          $ref: "#/components/responses/BackupDestinationResticOK"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+
+    put:
+      summary: Keep a destination's backups with restic
+      description: |
+        From now on a backup to this destination goes into a restic repository there,
+        in the folder `casaos-restic`: a run costs what changed since the last one,
+        and the files keep their owners and permissions. Backups already on the
+        destination stay where they are and can still be restored.
+
+        Without a `password` a new repository is made with a new password, which is
+        **returned here and nowhere else**: a repository whose password is lost
+        cannot be read by anyone. With one, the destination is attached to the
+        repository already there -- how backups are reached again on another box.
+
+        The password is kept on this box in a file only root can read, and the
+        box's own backup holds it.
+      operationId: enableBackupDestinationRestic
+      tags:
+        - Backup methods
+      parameters:
+        - $ref: "#/components/parameters/BackupDestinationName"
+      requestBody:
+        $ref: "#/components/requestBodies/RequestBackupDestinationRestic"
+      responses:
+        "200":
+          $ref: "#/components/responses/BackupDestinationResticPasswordOK"
+        "400":
+          $ref: "#/components/responses/ResponseBadRequest"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+
+  /backup/destinations/{name}/restic/check:
+    post:
+      summary: Check the restic repository of a destination now
+      description: |
+        Asks restic whether the repository is sound: its index and snapshots read, and
+        every pack file the index names there with the size it should have. It does
+        not read the data inside the packs. The same check runs by itself once a week
+        and the answer is `last_check` of the destination's restic state; a fault is
+        also told on the message bus as `backup:check-error`.
+
+        Returns as soon as the check has started. A repository is read whole by a
+        check, so only one runs at a time: a second asked for meanwhile is refused.
+      operationId: checkBackupDestinationRestic
+      tags:
+        - Backup methods
+      parameters:
+        - $ref: "#/components/parameters/BackupDestinationName"
+      responses:
+        "200":
+          $ref: "#/components/responses/ResponseOK"
+        "400":
+          $ref: "#/components/responses/ResponseBadRequest"
+        "409":
+          $ref: "#/components/responses/ResponseConflict"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+
   /backup/destinations/{name}/runs/{app}/{stamp}:
     delete:
       summary: Delete one backup at a destination
@@ -1801,7 +1876,7 @@ components:
 
     DeleteConfigFolder:
       name: delete_config_folder
-      description: Delete the config folder of the app
+      description: Delete the config folder of the app, and with it its named Docker volumes. Left false, both stay, and the next install of the app finds its data.
       in: query
       schema:
         type: boolean
@@ -1954,6 +2029,14 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/BackupDestinationSpec"
+
+    RequestBackupDestinationRestic:
+      description: The password of a repository that is already there; empty for a new one
+      required: false
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BackupDestinationResticSpec"
 
     RequestBackup:
       description: Where to put this backup, and whether to stop the app first
@@ -2439,6 +2522,28 @@ components:
               - properties:
                   data:
                     $ref: "#/components/schemas/BackupDestinationSpace"
+
+    BackupDestinationResticOK:
+      description: OK
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/BaseResponse"
+              - properties:
+                  data:
+                    $ref: "#/components/schemas/BackupDestinationRestic"
+
+    BackupDestinationResticPasswordOK:
+      description: OK
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/BaseResponse"
+              - properties:
+                  data:
+                    $ref: "#/components/schemas/BackupDestinationResticPassword"
 
     ComposeAppContainerStatsOK:
       description: OK
@@ -3105,6 +3210,15 @@ components:
         password:
           type: string
           description: The encryption password. Required with `encrypt`; never returned.
+        root:
+          type: string
+          description: |-
+            Where on the backend everything is put, handed to rclone as it is: a folder,
+            or for an object store (s3) the bucket. Without it an object store gets one
+            bucket per app, named after the app, which a provider where bucket names are
+            shared by everyone will refuse. A destination made without it keeps working
+            as it did.
+          example: "my-box-backups"
         parameters:
           type: object
           additionalProperties:
@@ -3128,6 +3242,47 @@ components:
         total:
           type: integer
           format: int64
+
+    BackupDestinationRestic:
+      required:
+        - available
+        - enabled
+      properties:
+        available:
+          type: boolean
+        enabled:
+          type: boolean
+        last_check:
+          $ref: "#/components/schemas/BackupDestinationResticCheck"
+
+    BackupDestinationResticCheck:
+      description: How the last check of a restic repository went.
+      required:
+        - at
+        - ok
+      properties:
+        at:
+          type: string
+          format: date-time
+        ok:
+          type: boolean
+        error:
+          type: string
+          description: What restic said, when the repository did not check out.
+
+    BackupDestinationResticSpec:
+      properties:
+        password:
+          type: string
+          description: Opens the repository already at this destination. Leave out for a new one.
+
+    BackupDestinationResticPassword:
+      required:
+        - password
+      properties:
+        password:
+          type: string
+          description: Opens the repository. Shown once.
 
     BackupHeldApp:
       description: One app a destination holds backups of.

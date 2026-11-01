@@ -127,7 +127,7 @@ var EventTypes = []message_bus.EventType{
 	EventTypeAppInstallBegin, EventTypeAppInstallProgress, EventTypeAppInstallEnd, EventTypeAppInstallError,
 	EventTypeAppUninstallBegin, EventTypeAppUninstallEnd, EventTypeAppUninstallError,
 	EventTypeAppUpdateBegin, EventTypeAppUpdateEnd, EventTypeAppUpdateError,
-	EventTypeBackupBegin, EventTypeBackupProgress, EventTypeBackupEnd, EventTypeBackupError,
+	EventTypeBackupBegin, EventTypeBackupProgress, EventTypeBackupEnd, EventTypeBackupError, EventTypeBackupCheckError,
 	EventTypeAppApplyChangesBegin, EventTypeAppApplyChangesEnd, EventTypeAppApplyChangesError,
 	EventTypeAppStartBegin, EventTypeAppStartEnd, EventTypeAppStartError,
 	EventTypeAppStopBegin, EventTypeAppStopEnd, EventTypeAppStopError,
@@ -300,6 +300,16 @@ var (
 			PropertyTypeAppName, PropertyTypeAppTitle, PropertyTypeAppIcon,
 			PropertyTypeBackupDestination, PropertyTypeBackupStamp, PropertyTypeBackupKind,
 			PropertyTypeMessage,
+		},
+	}
+
+	// A restic repository that does not check out. Its own event rather than a backup
+	// error: that one has an app, and the dashboard names the app in its toast.
+	EventTypeBackupCheckError = message_bus.EventType{
+		SourceID: AppManagementServiceName,
+		Name:     "backup:check-error",
+		PropertyTypeList: []message_bus.PropertyType{
+			PropertyTypeBackupDestination, PropertyTypeMessage,
 		},
 	}
 

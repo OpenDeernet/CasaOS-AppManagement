@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ReCasaOS/CasaOS-AppManagement/pkg/rclone"
+	"github.com/ReCasaOS/CasaOS-AppManagement/pkg/restic"
 )
 
 // The bridge between a schedule and the pieces that do the work.
@@ -34,7 +34,7 @@ func (r *scheduledBackupRunner) Run(ctx context.Context, schedule BackupSchedule
 		return BackupManifest{}, fmt.Errorf("`%s` is scheduled for backup but is not installed any more", schedule.App)
 	}
 
-	return RunBackup(ctx, composeApp, MyService.Docker(), rclone.NewClient(), BackupOptions{
+	return RunBackup(ctx, composeApp, MyService.Docker(), restic.NewRouter(), BackupOptions{
 		Destination: schedule.Destination,
 		Stamp:       stamp,
 		HoldStill:   schedule.HoldStill,
@@ -42,9 +42,9 @@ func (r *scheduledBackupRunner) Run(ctx context.Context, schedule BackupSchedule
 }
 
 func (r *scheduledBackupRunner) Runs(destination, app string) ([]string, error) {
-	return rclone.NewClient().Runs(destination, app)
+	return restic.NewRouter().Runs(destination, app)
 }
 
 func (r *scheduledBackupRunner) Purge(ctx context.Context, destination, remotePath string) error {
-	return rclone.NewClient().Purge(ctx, destination, remotePath)
+	return restic.NewRouter().Purge(ctx, destination, remotePath)
 }
