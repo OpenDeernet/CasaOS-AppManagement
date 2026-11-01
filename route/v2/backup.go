@@ -56,15 +56,20 @@ func (a *AppManagement) SetBackupDestination(ctx echo.Context, name codegen.Back
 		parameters = *spec.Parameters
 	}
 
+	root := ""
+	if spec.Root != nil {
+		root = *spec.Root
+	}
+
 	var err error
 	if spec.Encrypt != nil && *spec.Encrypt {
 		password := ""
 		if spec.Password != nil {
 			password = *spec.Password
 		}
-		err = rclone.NewClient().CreateEncryptedDestination(string(name), spec.Backend, parameters, password)
+		err = rclone.NewClient().CreateEncryptedDestination(string(name), spec.Backend, root, parameters, password)
 	} else {
-		err = rclone.NewClient().CreateDestination(string(name), spec.Backend, parameters)
+		err = rclone.NewClient().CreateDestination(string(name), spec.Backend, root, parameters)
 	}
 	if err != nil {
 		return backupError(ctx, err)

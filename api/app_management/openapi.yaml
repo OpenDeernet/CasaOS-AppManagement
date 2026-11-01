@@ -3182,6 +3182,15 @@ components:
         password:
           type: string
           description: The encryption password. Required with `encrypt`; never returned.
+        root:
+          type: string
+          description: |-
+            Where on the backend everything is put, handed to rclone as it is: a folder,
+            or for an object store (s3) the bucket. Without it an object store gets one
+            bucket per app, named after the app, which a provider where bucket names are
+            shared by everyone will refuse. A destination made without it keeps working
+            as it did.
+          example: "my-box-backups"
         parameters:
           type: object
           additionalProperties:
