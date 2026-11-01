@@ -134,7 +134,9 @@ func TestACheckAskedForByHandRefusesWhileAnotherRuns(t *testing.T) {
 	if len(checker.checked) != 1 {
 		t.Fatalf("and it runs: %v", checker.checked)
 	}
-	if _, again := StartResticCheck(context.Background(), checkDay, checker, "nas"); !again {
+	again, started := StartResticCheck(context.Background(), checkDay, checker, "nas")
+	if !started {
 		t.Fatal("the next one can start once the first is over")
 	}
+	<-again // a check left running would outlive the file this test gave it
 }
