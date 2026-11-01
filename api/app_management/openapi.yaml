@@ -1848,7 +1848,7 @@ components:
 
     DeleteConfigFolder:
       name: delete_config_folder
-      description: Delete the config folder of the app
+      description: Delete the config folder of the app, and with it its named Docker volumes. Left false, both stay, and the next install of the app finds its data.
       in: query
       schema:
         type: boolean

@@ -1112,6 +1112,17 @@ func (a *ComposeApp) PullAndInstall(ctx context.Context) error {
 	return nil
 }
 
+// uninstallDownOptions is what an uninstall asks compose to take down. The named volumes are
+// the app's data, a database included: they go with the config folder, not before, so that
+// leaving the box unticked keeps them for the next install of the app.
+func uninstallDownOptions(deleteConfigFolder bool) api.DownOptions {
+	return api.DownOptions{
+		RemoveOrphans: true,
+		Images:        "all",
+		Volumes:       deleteConfigFolder,
+	}
+}
+
 func (a *ComposeApp) Uninstall(ctx context.Context, deleteConfigFolder bool) error {
 	service, dockerClient, err := apiService()
 	if err != nil {
@@ -1143,11 +1154,7 @@ func (a *ComposeApp) Uninstall(ctx context.Context, deleteConfigFolder bool) err
 
 	defer PublishEventWrapper(ctx, common.EventTypeContainerRemoveEnd, nil)
 
-	if err := service.Down(ctx, a.Name, api.DownOptions{
-		RemoveOrphans: true,
-		Images:        "all",
-		Volumes:       true,
-	}); err != nil {
+	if err := service.Down(ctx, a.Name, uninstallDownOptions(deleteConfigFolder)); err != nil {
 		go PublishEventWrapper(ctx, common.EventTypeImageRemoveError, map[string]string{
 			common.PropertyTypeMessage.Name: err.Error(),
 		})
