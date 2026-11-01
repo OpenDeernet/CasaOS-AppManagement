@@ -291,3 +291,33 @@ func contains(list []string, item string) bool {
 
 	return false
 }
+
+func TestCheckAsksResticToCheckTheRepositoryOfThatDestination(t *testing.T) {
+	f := &fake{}
+	e := engineWith(t, f)
+
+	if err := e.Check(context.Background(), "nas"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := strings.Join(f.last(), " "); got != "check" {
+		t.Fatalf("want a plain check, got %q", got)
+	}
+	if !strings.Contains(strings.Join(f.calls[0].env, " "), "RESTIC_REPOSITORY=repo-of-nas") {
+		t.Fatalf("the repository of the destination: %v", f.calls[0].env)
+	}
+}
+
+func TestACheckThatFindsAFaultSaysWhatResticSaid(t *testing.T) {
+	f := &fake{replies: map[string]func() ([]byte, error){
+		"check": reply("", &ExitError{Code: 1, Message: "pack 1a2b: does not exist"}),
+	}}
+	e := engineWith(t, f)
+
+	err := e.Check(context.Background(), "nas")
+
+	var exit *ExitError
+	if !errors.As(err, &exit) || !strings.Contains(exit.Message, "pack 1a2b") {
+		t.Fatalf("the fault must reach the person: %v", err)
+	}
+}
