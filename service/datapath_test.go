@@ -10,10 +10,10 @@ import (
 
 func TestApplyDataPath(t *testing.T) {
 	prevStats, prevGit, prevLog, prevHold, prevSched, prevImg := StatsDir, gitAppsDir, BackupLogPath, BackupHoldPath, BackupSchedulePath, imageUpdateStatePath
-	prevKey, prevCache := restic.KeyDir, restic.CacheDir
+	prevKey, prevCache, prevChecks := restic.KeyDir, restic.CacheDir, ResticCheckPath
 	t.Cleanup(func() {
 		StatsDir, gitAppsDir, BackupLogPath, BackupHoldPath, BackupSchedulePath, imageUpdateStatePath = prevStats, prevGit, prevLog, prevHold, prevSched, prevImg
-		restic.KeyDir, restic.CacheDir = prevKey, prevCache
+		restic.KeyDir, restic.CacheDir, ResticCheckPath = prevKey, prevCache, prevChecks
 	})
 
 	root := t.TempDir()
@@ -28,6 +28,7 @@ func TestApplyDataPath(t *testing.T) {
 		"BackupHoldPath":       filepath.Join(root, "backups", "holding.json"),
 		"BackupSchedulePath":   filepath.Join(root, "backups", "schedules.json"),
 		"imageUpdateStatePath": filepath.Join(root, "image_updates.json"),
+		"ResticCheckPath":      filepath.Join(root, "backups", "restic-checks.json"),
 	}
 	gotPaths := map[string]string{
 		"StatsDir":             StatsDir,
@@ -36,6 +37,7 @@ func TestApplyDataPath(t *testing.T) {
 		"BackupHoldPath":       BackupHoldPath,
 		"BackupSchedulePath":   BackupSchedulePath,
 		"imageUpdateStatePath": imageUpdateStatePath,
+		"ResticCheckPath":      ResticCheckPath,
 	}
 	for name, w := range want {
 		if gotPaths[name] != w {
@@ -58,10 +60,10 @@ func TestApplyDataPath(t *testing.T) {
 
 func TestApplyDataPathEmptyUsesDefault(t *testing.T) {
 	prev := StatsDir
-	prevKey, prevCache := restic.KeyDir, restic.CacheDir
+	prevKey, prevCache, prevChecks := restic.KeyDir, restic.CacheDir, ResticCheckPath
 	t.Cleanup(func() {
 		StatsDir = prev
-		restic.KeyDir, restic.CacheDir = prevKey, prevCache
+		restic.KeyDir, restic.CacheDir, ResticCheckPath = prevKey, prevCache, prevChecks
 	})
 	got := ApplyDataPath("")
 	if got != constants.DefaultDataPath {
@@ -76,6 +78,9 @@ func TestApplyDataPathEmptyUsesDefault(t *testing.T) {
 	}
 	if restic.CacheDir != "/var/cache/casaos/restic" {
 		t.Fatalf("CacheDir = %q, want packaged default", restic.CacheDir)
+	}
+	if ResticCheckPath != "/var/lib/casaos/backups/restic-checks.json" {
+		t.Fatalf("ResticCheckPath = %q, want the packaged default", ResticCheckPath)
 	}
 }
 

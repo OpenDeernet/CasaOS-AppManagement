@@ -22,6 +22,7 @@ func ApplyDataPath(root string) string {
 	BackupHoldPath = filepath.Join(root, "backups", "holding.json")
 	BackupSchedulePath = filepath.Join(root, "backups", "schedules.json")
 	imageUpdateStatePath = filepath.Join(root, "image_updates.json")
+	ResticCheckPath = filepath.Join(root, "backups", "restic-checks.json")
 	restic.KeyDir = filepath.Join(root, "backups", "restic")
 	if root == constants.DefaultDataPath {
 		restic.CacheDir = "/var/cache/casaos/restic"
