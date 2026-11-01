@@ -17,6 +17,7 @@ import (
 	"github.com/ReCasaOS/CasaOS-AppManagement/common"
 	"github.com/ReCasaOS/CasaOS-AppManagement/pkg/config"
 	"github.com/ReCasaOS/CasaOS-AppManagement/route"
+	v1 "github.com/ReCasaOS/CasaOS-AppManagement/route/v1"
 	"github.com/ReCasaOS/CasaOS-AppManagement/service"
 	"github.com/ReCasaOS/CasaOS-Common/model"
 	"github.com/ReCasaOS/CasaOS-Common/utils/file"
@@ -70,6 +71,10 @@ func main() {
 
 		config.InitSetup(*configFlag, _confSample)
 		config.InitGlobal(*configFlag)
+
+		root := service.ApplyDataPath(config.AppInfo.DataPath)
+		service.ApplyGitAppsDataRoot(os.Getenv("CASAOS_GIT_APPS_DATA"))
+		v1.DockerRootDirFilePath = filepath.Join(root, "docker_root")
 
 		logger.LogInit(config.AppInfo.LogPath, config.AppInfo.LogSaveName, config.AppInfo.LogFileExt)
 

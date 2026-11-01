@@ -22,6 +22,7 @@ var (
 	AppInfo = &model.APPModel{
 		AppStorePath: filepath.Join(constants.DefaultDataPath, "appstore"),
 		AppsPath:     filepath.Join(constants.DefaultDataPath, "apps"),
+		DataPath:     constants.DefaultDataPath,
 		LogPath:      constants.DefaultLogPath,
 		LogSaveName:  common.AppManagementServiceName,
 		LogFileExt:   "log",

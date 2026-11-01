@@ -32,10 +32,9 @@ import (
 	"go.uber.org/zap"
 )
 
-const (
-	dockerRootDirFilePath             = "/var/lib/casaos/docker_root"
-	dockerDaemonConfigurationFilePath = "/etc/docker/daemon.json"
-)
+const dockerDaemonConfigurationFilePath = "/etc/docker/daemon.json"
+
+var DockerRootDirFilePath = "/var/lib/casaos/docker_root"
 
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
@@ -560,8 +559,8 @@ func GetDockerDaemonConfiguration(ctx echo.Context) error {
 	// }
 	data := make(map[string]interface{})
 
-	if file.Exists(dockerRootDirFilePath) {
-		buf := file.ReadFullFile(dockerRootDirFilePath)
+	if file.Exists(DockerRootDirFilePath) {
+		buf := file.ReadFullFile(DockerRootDirFilePath)
 		err := json.Unmarshal(buf, &data)
 		if err != nil {
 			return ctx.JSON(common_err.CLIENT_ERROR, &modelCommon.Result{Success: common_err.CLIENT_ERROR, Message: common_err.GetMsg(common_err.INVALID_PARAMS), Data: err})
@@ -610,8 +609,8 @@ func PutDockerDaemonConfiguration(ctx echo.Context) error {
 		return ctx.JSON(http.StatusBadRequest, &modelCommon.Result{Success: common_err.CLIENT_ERROR, Message: "error when trying to serialize docker root json", Data: err})
 	}
 
-	if err := file.WriteToFullPath(buf, dockerRootDirFilePath, 0o644); err != nil {
-		return ctx.JSON(http.StatusInternalServerError, &modelCommon.Result{Success: common_err.SERVICE_ERROR, Message: "error when trying to write " + dockerRootDirFilePath, Data: err})
+	if err := file.WriteToFullPath(buf, DockerRootDirFilePath, 0o644); err != nil {
+		return ctx.JSON(http.StatusInternalServerError, &modelCommon.Result{Success: common_err.SERVICE_ERROR, Message: "error when trying to write " + DockerRootDirFilePath, Data: err})
 	}
 
 	buf, err = json.Marshal(dockerConfig)

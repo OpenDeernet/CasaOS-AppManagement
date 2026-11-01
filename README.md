@@ -83,6 +83,8 @@ Go 1.26.8 or later, per `go.mod`. `codegen/` is generated and not committed, so 
 
 `go test ./...` also runs `./pkg/docker`, which drives a real Docker daemon and pulls images from Docker Hub. On a Windows workstation those tests fail on a goroutine-leak assertion against a `go-winio` worker; CI runs them on Linux. `TestComposeAppLifecycle` in `./service` stays skipped unless `CASAOS_INTEGRATION` is set — it needs a live CasaOS host, not just a daemon.
 
+`DataPath` in `app-management.conf` relocates catalogues, installed compose files, stats and restic key files (`<root>/backups/restic`) off `/var/lib/casaos` when set; empty keeps the packaged paths. restic's cache stays `/var/cache/casaos/restic` unless `DataPath` is not the default, in which case it is `<root>/cache/restic`. `CASAOS_GIT_APPS_DATA`, when non-empty, is the AppData root instead of `/DATA/AppData`. Neither is set on an installed box. The local process stack in CasaOS (`../CasaOS/dev/stack.sh`) sets both, and points `DOCKER_HOST` at a record-keeping Engine (`CasaOS/dev/fakedocker`) rather than `/var/run/docker.sock`. `TestComposeUpAgainstFakeDocker` in `./service` `go run`s that sibling onto a temp socket; it skips if the directory is missing. See CasaOS `dev/README.md`.
+
 ## Licence
 
 Apache License 2.0 — see [LICENSE](LICENSE); the upstream copyright notices are kept in the source. The service is the work of IceWhale and its contributors. The Docker SDK bump and the boot recovery sweep are [alvins82](https://github.com/alvins82)'s.
