@@ -218,3 +218,59 @@ func TestADestinationThatCannotSayHowMuchRoomItHas(t *testing.T) {
 		t.Fatalf("nothing said is not zero: %+v", space)
 	}
 }
+
+// rclone's S3 backend has no About: asked for the space, the daemon answers an error
+// rather than an empty answer. That is not a destination that cannot be reached, and
+// listing the root says whether it can.
+func TestADestinationWithoutAboutIsCheckedByListingIt(t *testing.T) {
+	client, seen := serverFor(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/operations/about" {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"S3 root doesn't support about","status":500}`))
+
+			return
+		}
+		_, _ = w.Write([]byte(`{"list":[]}`))
+	})
+
+	space, err := client.CheckDestination("bucket")
+	if err != nil {
+		t.Fatalf("a destination that can be listed is reachable: %v", err)
+	}
+	if space.Free != nil || space.Used != nil || space.Total != nil {
+		t.Fatalf("no space is told when the backend has none: %+v", space)
+	}
+	if len(*seen) != 2 || (*seen)[1].URL.Path != "/operations/list" || (*seen)[1].PostForm.Get("fs") != "casaos-backup-bucket:" {
+		t.Fatalf("the root of the destination is what gets listed: %v", *seen)
+	}
+}
+
+func TestADestinationWithoutAboutThatCannotBeListedIsNotReachable(t *testing.T) {
+	client, _ := serverFor(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		if r.URL.Path == "/operations/about" {
+			_, _ = w.Write([]byte(`{"error":"S3 root doesn't support about","status":500}`))
+
+			return
+		}
+		_, _ = w.Write([]byte(`{"error":"InvalidAccessKeyId","status":500}`))
+	})
+
+	if _, err := client.CheckDestination("bucket"); err == nil {
+		t.Fatal("a wrong key must still be reported")
+	}
+}
+
+func TestAnErrorOtherThanNoAboutIsNotHiddenByListing(t *testing.T) {
+	client, seen := serverFor(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"couldn't connect","status":500}`))
+	})
+
+	if _, err := client.CheckDestination("nas"); err == nil {
+		t.Fatal("an unreachable destination must be reported")
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("nothing else is asked once the first answer is a real error: %d calls", len(*seen))
+	}
+}
