@@ -4,13 +4,16 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/ReCasaOS/CasaOS-AppManagement/pkg/restic"
 	"github.com/ReCasaOS/CasaOS-Common/utils/constants"
 )
 
 func TestApplyDataPath(t *testing.T) {
 	prevStats, prevGit, prevLog, prevHold, prevSched, prevImg := StatsDir, gitAppsDir, BackupLogPath, BackupHoldPath, BackupSchedulePath, imageUpdateStatePath
+	prevKey, prevCache := restic.KeyDir, restic.CacheDir
 	t.Cleanup(func() {
 		StatsDir, gitAppsDir, BackupLogPath, BackupHoldPath, BackupSchedulePath, imageUpdateStatePath = prevStats, prevGit, prevLog, prevHold, prevSched, prevImg
+		restic.KeyDir, restic.CacheDir = prevKey, prevCache
 	})
 
 	root := t.TempDir()
@@ -45,11 +48,21 @@ func TestApplyDataPath(t *testing.T) {
 	if osUpgradeBusyPath != "/var/lib/casaos/os-upgrade/busy" {
 		t.Errorf("osUpgradeBusyPath changed: %q", osUpgradeBusyPath)
 	}
+	if restic.KeyDir != filepath.Join(root, "backups", "restic") {
+		t.Errorf("KeyDir = %q, want under root", restic.KeyDir)
+	}
+	if restic.CacheDir != filepath.Join(root, "cache", "restic") {
+		t.Errorf("CacheDir = %q, want under root", restic.CacheDir)
+	}
 }
 
 func TestApplyDataPathEmptyUsesDefault(t *testing.T) {
 	prev := StatsDir
-	t.Cleanup(func() { StatsDir = prev })
+	prevKey, prevCache := restic.KeyDir, restic.CacheDir
+	t.Cleanup(func() {
+		StatsDir = prev
+		restic.KeyDir, restic.CacheDir = prevKey, prevCache
+	})
 	got := ApplyDataPath("")
 	if got != constants.DefaultDataPath {
 		t.Fatalf("root = %q, want %q", got, constants.DefaultDataPath)
@@ -57,6 +70,22 @@ func TestApplyDataPathEmptyUsesDefault(t *testing.T) {
 	want := filepath.Join(constants.DefaultDataPath, "stats", "app_management")
 	if StatsDir != want {
 		t.Fatalf("StatsDir = %q, want %q", StatsDir, want)
+	}
+	if restic.KeyDir != filepath.Join(constants.DefaultDataPath, "backups", "restic") {
+		t.Fatalf("KeyDir = %q", restic.KeyDir)
+	}
+	if restic.CacheDir != "/var/cache/casaos/restic" {
+		t.Fatalf("CacheDir = %q, want packaged default", restic.CacheDir)
+	}
+}
+
+func TestApplyDataPathDefaultRestoresCacheDir(t *testing.T) {
+	prevKey, prevCache := restic.KeyDir, restic.CacheDir
+	t.Cleanup(func() { restic.KeyDir, restic.CacheDir = prevKey, prevCache })
+	ApplyDataPath(t.TempDir())
+	ApplyDataPath("")
+	if restic.CacheDir != "/var/cache/casaos/restic" {
+		t.Fatalf("CacheDir = %q", restic.CacheDir)
 	}
 }
 
