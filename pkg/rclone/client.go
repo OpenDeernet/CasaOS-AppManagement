@@ -205,9 +205,14 @@ type DestinationSpace struct {
 func (c *Client) CheckDestination(name string) (DestinationSpace, error) {
 	var space DestinationSpace
 
-	err := c.call("/operations/about", map[string]string{
-		"fs": DestinationPrefix + name + ":",
-	}, &space)
+	fs := DestinationPrefix + name + ":"
+
+	err := c.call("/operations/about", map[string]string{"fs": fs}, &space)
+	if err != nil && strings.Contains(err.Error(), "doesn't support about") {
+		// S3 answers an error here, not an empty space: it has no About at all. Whether the
+		// destination can be reached is then what listing its root says, and no space is told.
+		return DestinationSpace{}, c.call("/operations/list", map[string]string{"fs": fs, "remote": ""}, nil)
+	}
 
 	return space, err
 }
