@@ -125,12 +125,39 @@ func (a *AppManagement) CheckBackupDestination(ctx echo.Context, name codegen.Ba
 
 // BackupDestinationRestic says whether a destination keeps its backups with restic.
 func (a *AppManagement) BackupDestinationRestic(ctx echo.Context, name codegen.BackupDestinationName) error {
-	return ctx.JSON(http.StatusOK, codegen.BackupDestinationResticOK{
-		Message: utils.Ptr("OK"),
-		Data: &codegen.BackupDestinationRestic{
-			Available: restic.Available(),
-			Enabled:   restic.New().Enabled(string(name)),
-		},
+	state := &codegen.BackupDestinationRestic{
+		Available: restic.Available(),
+		Enabled:   restic.New().Enabled(string(name)),
+	}
+
+	// how the last check went is a nicety: a file that cannot be read says nothing here
+	if checks, err := service.ResticChecks(); err == nil {
+		if last, ok := checks[string(name)]; ok {
+			state.LastCheck = &codegen.BackupDestinationResticCheck{At: last.At, Ok: last.OK}
+			if last.Error != "" {
+				state.LastCheck.Error = utils.Ptr(last.Error)
+			}
+		}
+	}
+
+	return ctx.JSON(http.StatusOK, codegen.BackupDestinationResticOK{Message: utils.Ptr("OK"), Data: state})
+}
+
+// CheckBackupDestinationRestic starts a check of the repository now and returns; the
+// answer is the destination's restic state once it is over.
+func (a *AppManagement) CheckBackupDestinationRestic(ctx echo.Context, name codegen.BackupDestinationName) error {
+	if !restic.New().Enabled(string(name)) {
+		return backupBadRequest(ctx, fmt.Errorf("`%s` does not keep its backups with restic", name))
+	}
+
+	// detached from the request, as a backup is: the check outlives the answer
+	if _, started := service.StartResticCheck(context.Background(), time.Now(), service.NewResticChecker(), string(name)); !started {
+		message := "a repository is being checked already; each check reads a whole repository, so one runs at a time"
+		return ctx.JSON(http.StatusConflict, codegen.ResponseConflict{Message: &message})
+	}
+
+	return ctx.JSON(http.StatusOK, codegen.BaseResponse{
+		Message: utils.Ptr(fmt.Sprintf("checking the restic repository of `%s`", name)),
 	})
 }
 

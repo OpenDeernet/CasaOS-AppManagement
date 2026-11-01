@@ -890,7 +890,8 @@ paths:
       summary: Whether a destination keeps its backups with restic
       description: |
         `available` is whether the restic program is on this box; `enabled` is
-        whether this destination has been switched to it.
+        whether this destination has been switched to it. `last_check` is how the
+        last check of its repository went, once there has been one.
       operationId: backupDestinationRestic
       tags:
         - Backup methods
@@ -929,6 +930,33 @@ paths:
           $ref: "#/components/responses/BackupDestinationResticPasswordOK"
         "400":
           $ref: "#/components/responses/ResponseBadRequest"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+
+  /backup/destinations/{name}/restic/check:
+    post:
+      summary: Check the restic repository of a destination now
+      description: |
+        Asks restic whether the repository is sound: its index and snapshots read, and
+        every pack file the index names there with the size it should have. It does
+        not read the data inside the packs. The same check runs by itself once a week
+        and the answer is `last_check` of the destination's restic state; a fault is
+        also told on the message bus as `backup:check-error`.
+
+        Returns as soon as the check has started. A repository is read whole by a
+        check, so only one runs at a time: a second asked for meanwhile is refused.
+      operationId: checkBackupDestinationRestic
+      tags:
+        - Backup methods
+      parameters:
+        - $ref: "#/components/parameters/BackupDestinationName"
+      responses:
+        "200":
+          $ref: "#/components/responses/ResponseOK"
+        "400":
+          $ref: "#/components/responses/ResponseBadRequest"
+        "409":
+          $ref: "#/components/responses/ResponseConflict"
         "500":
           $ref: "#/components/responses/ResponseInternalServerError"
 
@@ -3224,6 +3252,23 @@ components:
           type: boolean
         enabled:
           type: boolean
+        last_check:
+          $ref: "#/components/schemas/BackupDestinationResticCheck"
+
+    BackupDestinationResticCheck:
+      description: How the last check of a restic repository went.
+      required:
+        - at
+        - ok
+      properties:
+        at:
+          type: string
+          format: date-time
+        ok:
+          type: boolean
+        error:
+          type: string
+          description: What restic said, when the repository did not check out.
 
     BackupDestinationResticSpec:
       properties:

@@ -234,6 +234,18 @@ func (e *Engine) open(ctx context.Context, destination string) error {
 	}
 }
 
+// Check asks restic whether the repository is sound: its index and snapshots read,
+// and every pack file the index names is there with the size it should have.
+//
+// shortcut: it does not read the data inside the packs, which downloads the whole
+// repository (and at a cloud provider, bills it); a bit that rots inside a pack that
+// is the right size passes. Add `--read-data-subset` if that is ever felt.
+func (e *Engine) Check(ctx context.Context, destination string) error {
+	_, err := e.call(ctx, destination, "check")
+
+	return err
+}
+
 // snapshot is the part of `restic snapshots --json` this package reads.
 type snapshot struct {
 	ID    string    `json:"id"`
