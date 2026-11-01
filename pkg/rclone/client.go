@@ -262,7 +262,13 @@ func (c *Client) CheckDestination(name string) (DestinationSpace, error) {
 	if err != nil && strings.Contains(err.Error(), "doesn't support about") {
 		// S3 answers an error here, not an empty space: it has no About at all. Whether the
 		// destination can be reached is then what listing its root says, and no space is told.
-		return DestinationSpace{}, c.call("/operations/list", map[string]string{"fs": fs, "remote": ""}, nil)
+		err = c.call("/operations/list", map[string]string{"fs": fs, "remote": ""}, nil)
+		if err != nil && strings.Contains(err.Error(), "directory not found") {
+			// a root typed by hand: this is the typo, or the bucket not made yet
+			err = fmt.Errorf("the bucket or folder of this destination does not exist (%w)", err)
+		}
+
+		return DestinationSpace{}, err
 	}
 
 	return space, err

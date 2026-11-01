@@ -376,3 +376,21 @@ func TestAFailedAliasTakesTheBackendBackOut(t *testing.T) {
 		t.Fatalf("the raw remote must go with it: %v", deleted)
 	}
 }
+
+// The root of an object store is typed by hand, and a bucket that is not there is the
+// mistake to catch when the destination is saved, not at 3am.
+func TestAMissingBucketIsSaidInTheCheck(t *testing.T) {
+	client, _ := serverFor(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		if r.URL.Path == "/operations/about" {
+			_, _ = w.Write([]byte(`{"error":"S3 bucket mine doesn't support about"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"error":"error in ListJSON: directory not found"}`))
+	})
+
+	_, err := client.CheckDestination("offsite")
+	if err == nil || !strings.Contains(err.Error(), "bucket or folder of this destination does not exist") {
+		t.Fatalf("want the missing bucket said in words: %v", err)
+	}
+}
