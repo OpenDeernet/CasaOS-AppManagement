@@ -890,8 +890,11 @@ paths:
       summary: Whether a destination keeps its backups with restic
       description: |
         `available` is whether the restic program is on this box; `enabled` is
-        whether this destination has been switched to it. `last_check` is how the
-        last check of its repository went, once there has been one.
+        whether the backups to come go into restic. `kept` is whether this box holds
+        the key of a repository there, which is the case while `enabled` and also
+        after the destination was switched back: what the repository holds stays
+        listed and restorable. `last_check` is how the last check of its
+        repository went, once there has been one.
       operationId: backupDestinationRestic
       tags:
         - Backup methods
@@ -909,15 +912,23 @@ paths:
         From now on a backup to this destination goes into a restic repository there,
         in the folder `casaos-restic`: a run costs what changed since the last one,
         and the files keep their owners and permissions. Backups already on the
-        destination stay where they are and can still be restored.
+        destination stay where they are and can still be restored; they are listed
+        together with the ones in the repository, and the retention of a schedule
+        counts them all.
 
         Without a `password` a new repository is made with a new password, which is
         **returned here and nowhere else**: a repository whose password is lost
         cannot be read by anyone. With one, the destination is attached to the
         repository already there -- how backups are reached again on another box.
 
-        The password is kept on this box in a file only root can read, and the
-        box's own backup holds it.
+        A destination that was switched back (`DELETE`) still has its key on this
+        box: sent without a `password`, this takes the repository up again after
+        checking that it still opens, and the `password` it answers is empty. A
+        `password` sent for such a destination is refused.
+
+        The password is kept on this box in a file only root can read. The box's own
+        backup does not hold it: it may itself be kept in the repository the key
+        opens, and a key that lies inside what it opens opens nothing on a new box.
       operationId: enableBackupDestinationRestic
       tags:
         - Backup methods
@@ -928,6 +939,27 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/BackupDestinationResticPasswordOK"
+        "400":
+          $ref: "#/components/responses/ResponseBadRequest"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+
+    delete:
+      summary: Go back to rclone for a destination's next backups
+      description: |
+        The backups to come are made as stamped copies again. Nothing is deleted: the
+        repository stays on the destination, its key stays on this box, and what it
+        holds stays listed and restorable, so this can be undone with `PUT`.
+
+        A destination that does not keep a restic repository is refused.
+      operationId: disableBackupDestinationRestic
+      tags:
+        - Backup methods
+      parameters:
+        - $ref: "#/components/parameters/BackupDestinationName"
+      responses:
+        "200":
+          $ref: "#/components/responses/ResponseOK"
         "400":
           $ref: "#/components/responses/ResponseBadRequest"
         "500":
@@ -3247,10 +3279,13 @@ components:
       required:
         - available
         - enabled
+        - kept
       properties:
         available:
           type: boolean
         enabled:
+          type: boolean
+        kept:
           type: boolean
         last_check:
           $ref: "#/components/schemas/BackupDestinationResticCheck"

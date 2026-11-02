@@ -18,7 +18,7 @@ type fakeChecker struct {
 }
 
 func (f *fakeChecker) Destinations() ([]string, error) { return f.destinations, nil }
-func (f *fakeChecker) Enabled(destination string) bool { return f.kept[destination] }
+func (f *fakeChecker) Held(destination string) bool    { return f.kept[destination] }
 func (f *fakeChecker) Check(_ context.Context, destination string) error {
 	f.checked = append(f.checked, destination)
 

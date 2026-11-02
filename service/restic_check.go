@@ -103,7 +103,7 @@ func recordResticCheck(destination string, check ResticCheck) error {
 // without a daemon, a repository or a clock.
 type resticChecker interface {
 	Destinations() ([]string, error)
-	Enabled(destination string) bool
+	Held(destination string) bool
 	Check(ctx context.Context, destination string) error
 }
 
@@ -146,7 +146,7 @@ func RunDueResticChecks(ctx context.Context, now time.Time, checker resticChecke
 	}
 
 	for _, destination := range destinations {
-		if !checker.Enabled(destination) || !resticCheckDue(checks[destination], now) {
+		if !checker.Held(destination) || !resticCheckDue(checks[destination], now) {
 			continue
 		}
 

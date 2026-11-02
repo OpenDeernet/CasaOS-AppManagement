@@ -40,7 +40,11 @@ import (
 )
 
 // KeyDir is where the repositories' passwords are kept, one file per destination.
-// It is inside /var/lib/casaos/backups, which the box's own backup already holds.
+// The box's own backup does not hold them: it may itself be kept in the repository
+// a key opens, and a key that lies inside what it opens opens nothing on a new box.
+//
+// A destination switched back to rclone keeps its key and gains a marker next to
+// it, `<name>.key.off`: the repository is still read, only no longer written to.
 var KeyDir = "/var/lib/casaos/backups/restic"
 
 // CacheDir is where restic keeps what it learns about a repository between runs.
@@ -66,6 +70,10 @@ var (
 	ErrNotInstalled = errors.New("restic is not installed on this box")
 	// ErrAlreadyEnabled is a destination that is a restic repository already.
 	ErrAlreadyEnabled = errors.New("this destination already keeps its backups with restic")
+	// ErrKeyKept is a password given for a destination whose key this box still has.
+	ErrKeyKept = errors.New("this box still has the key of this destination's repository; take it up again without a password")
+	// ErrNotKept is a destination with no restic repository to go back from.
+	ErrNotKept = errors.New("this destination does not keep its backups with restic")
 	// ErrWrongPassword is a repository that is there and does not open with the
 	// password it was given.
 	ErrWrongPassword = errors.New("a restic repository is already there and this password does not open it")
@@ -140,8 +148,20 @@ func keyPath(destination string) (string, error) {
 	return filepath.Join(KeyDir, destination+".key"), nil
 }
 
-// Enabled says whether a destination keeps its backups with restic.
-func (e *Engine) Enabled(destination string) bool {
+// offPath is the marker of a destination switched back to rclone.
+func offPath(destination string) (string, error) {
+	key, err := keyPath(destination)
+	if err != nil {
+		return "", err
+	}
+
+	return key + ".off", nil
+}
+
+// Held says whether this box has the key of a restic repository at a destination:
+// what the repository holds can be listed and restored, whichever engine the next
+// backups go to.
+func (e *Engine) Held(destination string) bool {
 	key, err := keyPath(destination)
 	if err != nil {
 		return false
@@ -150,6 +170,36 @@ func (e *Engine) Enabled(destination string) bool {
 	_, err = os.Stat(key)
 
 	return err == nil
+}
+
+// Enabled says whether the backups to come at a destination go into restic.
+func (e *Engine) Enabled(destination string) bool {
+	if !e.Held(destination) {
+		return false
+	}
+
+	off, err := offPath(destination)
+	if err != nil {
+		return false
+	}
+
+	_, err = os.Stat(off)
+
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// Disable sends the next backups of a destination back to rclone. Nothing is
+// deleted: the key stays, the repository stays, and Enable takes it up again.
+func (e *Engine) Disable(destination string) error {
+	off, err := offPath(destination)
+	if err != nil {
+		return err
+	}
+	if !e.Held(destination) {
+		return ErrNotKept
+	}
+
+	return os.WriteFile(off, nil, 0o600)
 }
 
 // Available says whether the restic binary is on this box.
@@ -188,6 +238,14 @@ func (e *Engine) Enable(ctx context.Context, destination, password string) (stri
 	if e.Enabled(destination) {
 		return "", ErrAlreadyEnabled
 	}
+	if e.Held(destination) {
+		return "", e.resume(ctx, destination, password)
+	}
+
+	// a marker left without its key must not keep a new repository switched off
+	if off, err := offPath(destination); err == nil {
+		_ = os.Remove(off)
+	}
 
 	generated := password == ""
 	if generated {
@@ -212,6 +270,33 @@ func (e *Engine) Enable(ctx context.Context, destination, password string) (stri
 	}
 
 	return password, nil
+}
+
+// resume takes a destination switched back to rclone up again, with the key this
+// box kept. The repository must still open: a new one is never made here, which
+// would hide a repository that went missing under an empty one.
+func (e *Engine) resume(ctx context.Context, destination, password string) error {
+	if password != "" {
+		return ErrKeyKept
+	}
+
+	_, err := e.call(ctx, destination, "cat", "config")
+
+	var exit *ExitError
+	switch {
+	case err == nil:
+	case errors.As(err, &exit) && exit.Code == exitWrongKey:
+		return ErrWrongPassword
+	default:
+		return err
+	}
+
+	off, err := offPath(destination)
+	if err != nil {
+		return err
+	}
+
+	return os.Remove(off)
 }
 
 // open makes sure there is a repository to use: the one that is there, or a new
@@ -419,14 +504,22 @@ func (e *Engine) Runs(destinationName, appPath string) ([]string, error) {
 // Purge forgets one run -- every snapshot that shares its app and stamp -- and
 // frees what nothing else uses.
 func (e *Engine) Purge(ctx context.Context, destinationName, remotePath string) error {
+	_, err := e.forget(ctx, destinationName, remotePath)
+
+	return err
+}
+
+// forget is Purge that says whether the repository held the run at all, which is
+// how the router knows the run is one of the stamped copies instead.
+func (e *Engine) forget(ctx context.Context, destinationName, remotePath string) (bool, error) {
 	app, stamp, err := runOf(remotePath)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	all, err := e.snapshots(ctx, destinationName)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	ids := []string{}
@@ -436,10 +529,10 @@ func (e *Engine) Purge(ctx context.Context, destinationName, remotePath string) 
 		}
 	}
 	if len(ids) == 0 {
-		return nil
+		return false, nil
 	}
 
 	_, err = e.call(ctx, destinationName, append([]string{"forget", "--prune"}, ids...)...)
 
-	return err
+	return err == nil, err
 }

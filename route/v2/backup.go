@@ -128,6 +128,7 @@ func (a *AppManagement) BackupDestinationRestic(ctx echo.Context, name codegen.B
 	state := &codegen.BackupDestinationRestic{
 		Available: restic.Available(),
 		Enabled:   restic.New().Enabled(string(name)),
+		Kept:      restic.New().Held(string(name)),
 	}
 
 	// how the last check went is a nicety: a file that cannot be read says nothing here
@@ -146,7 +147,7 @@ func (a *AppManagement) BackupDestinationRestic(ctx echo.Context, name codegen.B
 // CheckBackupDestinationRestic starts a check of the repository now and returns; the
 // answer is the destination's restic state once it is over.
 func (a *AppManagement) CheckBackupDestinationRestic(ctx echo.Context, name codegen.BackupDestinationName) error {
-	if !restic.New().Enabled(string(name)) {
+	if !restic.New().Held(string(name)) {
 		return backupBadRequest(ctx, fmt.Errorf("`%s` does not keep its backups with restic", name))
 	}
 
@@ -177,7 +178,7 @@ func (a *AppManagement) EnableBackupDestinationRestic(ctx echo.Context, name cod
 	password, err := restic.New().Enable(ctx.Request().Context(), string(name), password)
 	if err != nil {
 		// each of these is something the person can fix; the rest is a failure to report
-		if errors.Is(err, restic.ErrNotInstalled) || errors.Is(err, restic.ErrAlreadyEnabled) || errors.Is(err, restic.ErrWrongPassword) {
+		if errors.Is(err, restic.ErrNotInstalled) || errors.Is(err, restic.ErrAlreadyEnabled) || errors.Is(err, restic.ErrWrongPassword) || errors.Is(err, restic.ErrKeyKept) {
 			return backupBadRequest(ctx, err)
 		}
 
@@ -187,6 +188,23 @@ func (a *AppManagement) EnableBackupDestinationRestic(ctx echo.Context, name cod
 	return ctx.JSON(http.StatusOK, codegen.BackupDestinationResticPasswordOK{
 		Message: utils.Ptr("OK"),
 		Data:    &codegen.BackupDestinationResticPassword{Password: password},
+	})
+}
+
+// DisableBackupDestinationRestic sends the next backups of a destination back to
+// rclone. Nothing is deleted: the repository and its key stay, and it can be taken
+// up again.
+func (a *AppManagement) DisableBackupDestinationRestic(ctx echo.Context, name codegen.BackupDestinationName) error {
+	if err := restic.New().Disable(string(name)); err != nil {
+		if errors.Is(err, restic.ErrNotKept) {
+			return backupBadRequest(ctx, err)
+		}
+
+		return backupError(ctx, err)
+	}
+
+	return ctx.JSON(http.StatusOK, codegen.BaseResponse{
+		Message: utils.Ptr(fmt.Sprintf("the next backups of `%s` are stamped copies again; its restic repository is kept and still read", name)),
 	})
 }
 
