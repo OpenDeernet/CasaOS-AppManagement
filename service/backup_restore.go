@@ -43,6 +43,10 @@ type RestoreOptions struct {
 	Destination string
 	App         string
 	Stamp       string
+	// Paths, when there are any, restore only those paths of the backup -- as browsing
+	// it names them -- onto the app as it is, over what is there and deleting nothing.
+	// Empty restores the whole backup, as it was.
+	Paths []string
 	// Containers lists the app's containers; nil means ask Docker. A seam for the
 	// tests, as on BackupOptions.
 	Containers func(ctx context.Context) (map[string][]codegen.ContainerSummary, error)
@@ -67,6 +71,7 @@ var (
 	ErrRestoreNeedsDestination = errors.New("a restore needs a destination")
 	ErrRestoreNeedsApp         = errors.New("a restore needs an app")
 	ErrRestoreNeedsStamp       = errors.New("a restore needs the backup to restore from")
+	ErrRestorePathsNeedApp     = errors.New("a restore of some files needs the app installed: install it, or restore the whole backup")
 )
 
 // RestoreBackup puts opts.App back the way the backup at opts.Stamp had it.
@@ -131,6 +136,9 @@ func restoreBackup(ctx context.Context, installed *ComposeApp, docker backupDock
 	}
 
 	app := installed
+	if app == nil && len(opts.Paths) > 0 {
+		return report, ErrRestorePathsNeedApp
+	}
 	if app == nil {
 		compose, env, err := fetchDefinition(ctx, restorer, opts.Destination, root, byDestination)
 		if err != nil {
@@ -188,6 +196,17 @@ func restoreBackup(ctx context.Context, installed *ComposeApp, docker backupDock
 		}
 	}()
 	if err != nil {
+		return report, err
+	}
+
+	if len(opts.Paths) > 0 {
+		partial, ok := restorer.(BackupPartialRestorer)
+		if !ok {
+			return report, errors.New("this box's backup engine cannot restore some paths of a backup")
+		}
+
+		err = restorePaths(ctx, partial, opts, manifest, root, local.Operations, &report)
+
 		return report, err
 	}
 

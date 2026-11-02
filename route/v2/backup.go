@@ -441,6 +441,9 @@ func (a *AppManagement) RestoreBackup(ctx echo.Context) error {
 	}
 
 	opts := service.RestoreOptions{Destination: request.Destination, App: request.App, Stamp: request.Stamp}
+	if request.Paths != nil {
+		opts.Paths = *request.Paths
+	}
 	switch {
 	case opts.Destination == "":
 		return backupBadRequest(ctx, service.ErrRestoreNeedsDestination)
@@ -448,6 +451,15 @@ func (a *AppManagement) RestoreBackup(ctx echo.Context) error {
 		return backupBadRequest(ctx, service.ErrRestoreNeedsApp)
 	case opts.Stamp == "":
 		return backupBadRequest(ctx, service.ErrRestoreNeedsStamp)
+	}
+	// said now rather than from the background, where only the run log would hear it
+	if len(opts.Paths) > 0 {
+		if opts.App == service.SystemBackupName {
+			return backupBadRequest(ctx, service.ErrRestoreBoxInParts)
+		}
+		if err := service.CheckRestorePaths(opts.Paths); err != nil {
+			return backupBadRequest(ctx, err)
+		}
 	}
 
 	backgroundCtx := common.WithProperties(context.Background(), PropertiesFromQueryParams(ctx))
@@ -478,6 +490,9 @@ func (a *AppManagement) RestoreBackup(ctx echo.Context) error {
 	// nil when the app is not installed: the restore installs it first, from the
 	// compose file the backup holds
 	installed := composeApps[opts.App]
+	if installed == nil && len(opts.Paths) > 0 {
+		return backupBadRequest(ctx, service.ErrRestorePathsNeedApp)
+	}
 
 	go func() {
 		report, err := service.RestoreOnDemand(backgroundCtx, installed, service.MyService.Docker(), restic.NewRouter(), installFromBackup, opts)
@@ -580,6 +595,39 @@ func (a *AppManagement) BackupDestinationRuns(ctx echo.Context, name codegen.Bac
 	return ctx.JSON(http.StatusOK, codegen.BackupDestinationRunsOK{
 		Message: utils.Ptr("OK"), Data: &out,
 	})
+}
+
+// BrowseBackup lists one level inside a backup, to choose what to put back.
+func (a *AppManagement) BrowseBackup(ctx echo.Context, name codegen.BackupDestinationName, app codegen.BackupApp, stamp codegen.BackupStamp, params codegen.BrowseBackupParams) error {
+	if string(app) == service.SystemBackupName {
+		return backupBadRequest(ctx, service.ErrRestoreBoxInParts)
+	}
+
+	rel := ""
+	if params.Path != nil {
+		rel = *params.Path
+	}
+
+	files, err := service.BrowseBackup(ctx.Request().Context(), restic.NewRouter(), string(name), string(app), string(stamp), rel)
+	if err != nil {
+		if errors.Is(err, service.ErrBackupPathOutside) || errors.Is(err, service.ErrBackupPathNotHeld) {
+			return backupBadRequest(ctx, err)
+		}
+
+		return backupError(ctx, err)
+	}
+
+	out := make([]codegen.BackupFile, 0, len(files))
+	for _, file := range files {
+		item := codegen.BackupFile{Name: file.Name, Directory: file.Directory, Size: file.Size}
+		if !file.Modified.IsZero() {
+			modified := file.Modified
+			item.Modified = &modified
+		}
+		out = append(out, item)
+	}
+
+	return ctx.JSON(http.StatusOK, codegen.BackupFilesOK{Message: utils.Ptr("OK"), Data: &out})
 }
 
 // BackupSystem backs the box itself up, in the background.

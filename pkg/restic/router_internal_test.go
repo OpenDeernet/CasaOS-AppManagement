@@ -5,6 +5,8 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+
+	"github.com/ReCasaOS/CasaOS-AppManagement/pkg/rclone"
 )
 
 // stamped is the rclone side: the copies a destination held before restic.
@@ -53,6 +55,16 @@ func (s *stamped) Runs(_ string, appPath string) ([]string, error) {
 
 func (s *stamped) Purge(context.Context, string, string) error {
 	s.record("Purge")
+	return s.failure
+}
+
+func (s *stamped) List(context.Context, string, string, string) ([]rclone.File, error) {
+	s.record("List")
+	return []rclone.File{{Name: "stamped.txt"}}, s.failure
+}
+
+func (s *stamped) CopyBack(context.Context, string, string, string, string) error {
+	s.record("CopyBack")
 	return s.failure
 }
 
@@ -278,5 +290,66 @@ func TestARealFailureToPurgeStillReachesThePerson(t *testing.T) {
 
 	if err := r.Purge(context.Background(), "nas", "blog/20260901"); !errors.Is(err, broken) {
 		t.Fatalf("err %v", err)
+	}
+}
+
+func TestAFolderOfARunInTheRepositoryIsListedFromTheRepository(t *testing.T) {
+	s := &stamped{}
+	f := &fake{replies: map[string]func() ([]byte, error){
+		"snapshots": reply(held, nil),
+		"ls":        reply(`{"name":"a.txt","type":"file","path":"/vol/data/a.txt","struct_type":"node"}`, nil),
+	}}
+
+	files, err := routerWith(t, f, s, true).List(context.Background(), "nas", "blog/20261002/volume-data", "")
+	if err != nil || len(files) != 1 || files[0].Name != "a.txt" {
+		t.Fatalf("%+v %v", files, err)
+	}
+	if len(s.calls) != 0 {
+		t.Fatalf("the stamped copies were asked too: %v", s.calls)
+	}
+}
+
+func TestAStampedCopyIsListedAndTakenBackFromRcloneWhileTheRepositoryIsKept(t *testing.T) {
+	s := &stamped{}
+	r := routerWith(t, &fake{replies: listing()}, s, true)
+
+	files, err := r.List(context.Background(), "nas", "blog/20260901/volume-data", "")
+	if err != nil || len(files) != 1 || files[0].Name != "stamped.txt" {
+		t.Fatalf("%+v %v", files, err)
+	}
+	if err := r.CopyBack(context.Background(), "nas", "blog/20260901/volume-data", "a", "/host/a"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(s.calls, []string{"List", "CopyBack"}) {
+		t.Fatalf("got %v", s.calls)
+	}
+}
+
+func TestADestinationWithoutARepositoryListsAndTakesBackFromRcloneAlone(t *testing.T) {
+	s := &stamped{}
+	f := &fake{replies: listing()}
+	r := routerWith(t, f, s, false)
+
+	if _, err := r.List(context.Background(), "nas", "blog/20260901/volume-data", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.CopyBack(context.Background(), "nas", "blog/20260901/volume-data", "", "/host"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("restic was asked about a destination that has none: %v", f.calls)
+	}
+}
+
+func TestAFailureOfTheRepositoryIsNotCoveredUpWhenListing(t *testing.T) {
+	s := &stamped{}
+	broken := errors.New("restic: wrong password")
+	f := &fake{replies: map[string]func() ([]byte, error){"snapshots": reply("", broken)}}
+
+	if _, err := routerWith(t, f, s, true).List(context.Background(), "nas", "blog/20261002/volume-data", ""); !errors.Is(err, broken) {
+		t.Fatalf("err %v", err)
+	}
+	if len(s.calls) != 0 {
+		t.Fatalf("fell back to the stamped copies: %v", s.calls)
 	}
 }

@@ -1012,6 +1012,41 @@ paths:
         "500":
           $ref: "#/components/responses/ResponseInternalServerError"
 
+  /backup/destinations/{name}/runs/{app}/{stamp}/files:
+    get:
+      summary: Look inside one backup
+      description: |
+        One level of what a backup holds, to choose files or folders to put back.
+        The top is the folders that lead to the backup's copies -- the volumes and
+        folders of the app; below that, what each copy holds. Folders come first,
+        then files by name. The compose file and `.env` are the definition of the
+        app, not data, and are not listed.
+
+        A path is relative to the backup and uses forward slashes. One that tries to
+        leave the backup (`..`) is refused. The listing is read from the repository
+        or from the stamped copy, whichever holds that backup.
+      operationId: browseBackup
+      tags:
+        - Backup methods
+      parameters:
+        - $ref: "#/components/parameters/BackupDestinationName"
+        - $ref: "#/components/parameters/BackupApp"
+        - $ref: "#/components/parameters/BackupStamp"
+        - name: path
+          description: The folder to list, relative to the backup. Empty is the top.
+          in: query
+          required: false
+          schema:
+            type: string
+            example: "volumes/data/docs"
+      responses:
+        "200":
+          $ref: "#/components/responses/BackupFilesOK"
+        "400":
+          $ref: "#/components/responses/ResponseBadRequest"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+
   /backup/destinations/{name}/runs:
     get:
       summary: What a destination holds
@@ -2504,6 +2539,19 @@ components:
                     items:
                       $ref: "#/components/schemas/BackupSchedule"
 
+    BackupFilesOK:
+      description: OK
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/BaseResponse"
+              - properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/BackupFile"
+
     BackupDestinationRunsOK:
       description: OK
       content:
@@ -3349,6 +3397,25 @@ components:
           default: true
           description: Stop the services that hold the box's files open for the length of the copy.
 
+    BackupFile:
+      description: One file or folder inside a backup.
+      required:
+        - name
+        - directory
+        - size
+      properties:
+        name:
+          type: string
+        directory:
+          type: boolean
+        size:
+          type: integer
+          format: int64
+          description: In bytes; zero for a folder.
+        modified:
+          type: string
+          format: date-time
+
     RestoreRequest:
       required:
         - destination
@@ -3366,6 +3433,17 @@ components:
           type: string
           description: Which backup, as the run log names it.
           example: "2026-09-13T02-29-56Z"
+        paths:
+          type: array
+          description: |
+            Put back only these paths of the backup, as browsing it names them, instead
+            of all of it. They go to the places the app has now, over what is there,
+            and nothing else is deleted -- unlike a whole restore, which makes the
+            folders hold what the backup holds. The app must be installed, and is
+            stopped for the copy as for a whole restore.
+          items:
+            type: string
+          example: ["volumes/data/docs/report.odt"]
 
     BackupRequest:
       required:

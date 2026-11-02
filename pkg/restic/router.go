@@ -9,7 +9,7 @@ import (
 	"github.com/ReCasaOS/CasaOS-AppManagement/pkg/rclone"
 )
 
-// legacy is the rclone side of the seven calls: the stamped copies.
+// legacy is the rclone side of the nine calls: the stamped copies.
 type legacy interface {
 	CopyDirectory(ctx context.Context, source, destinationName, destinationPath string) error
 	CopyFile(ctx context.Context, source, destinationName, destinationPath string) error
@@ -18,9 +18,11 @@ type legacy interface {
 	Fetch(ctx context.Context, destinationName, remotePath string) ([]byte, error)
 	Runs(destinationName, appPath string) ([]string, error)
 	Purge(ctx context.Context, destinationName, remotePath string) error
+	List(ctx context.Context, destinationName, remotePath, sub string) ([]rclone.File, error)
+	CopyBack(ctx context.Context, destinationName, remotePath, sub, hostPath string) error
 }
 
-// Router answers a backup's seven calls. The copies go where the destination keeps
+// Router answers a backup's nine calls. The copies go where the destination keeps
 // its backups now -- restic where it is switched to it, rclone everywhere else.
 // What is read goes to both while the box holds the key of a repository there: the
 // stamped copies a destination held before it was switched, and the repository it
@@ -90,6 +92,31 @@ func (r *Router) RestoreFile(ctx context.Context, destinationName, remotePath, h
 	}
 
 	return r.legacy.RestoreFile(ctx, destinationName, remotePath, hostPath)
+}
+
+// List and CopyBack follow the same rule as the restores: the repository first, the
+// stamped copies when it holds nothing at that path.
+
+func (r *Router) List(ctx context.Context, destinationName, remotePath, sub string) ([]rclone.File, error) {
+	if r.Restic.Held(destinationName) {
+		files, err := r.Restic.List(ctx, destinationName, remotePath, sub)
+		if !errors.Is(err, ErrNothingHeld) {
+			return files, err
+		}
+	}
+
+	return r.legacy.List(ctx, destinationName, remotePath, sub)
+}
+
+func (r *Router) CopyBack(ctx context.Context, destinationName, remotePath, sub, hostPath string) error {
+	if r.Restic.Held(destinationName) {
+		err := r.Restic.CopyBack(ctx, destinationName, remotePath, sub, hostPath)
+		if !errors.Is(err, ErrNothingHeld) {
+			return err
+		}
+	}
+
+	return r.legacy.CopyBack(ctx, destinationName, remotePath, sub, hostPath)
 }
 
 func (r *Router) Fetch(ctx context.Context, destinationName, remotePath string) ([]byte, error) {
