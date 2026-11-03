@@ -1,3 +1,9 @@
+<p align="center"><img src="https://raw.githubusercontent.com/ReCasaOS/.github/main/assets/recasaos-banner.svg" alt="ReCasaOS" width="640"></p>
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/C6K229ZZRH)
+
+[Support ReCasaOS](https://github.com/ReCasaOS/.github/blob/main/FUNDING.md)
+
 # CasaOS-AppManagement
 
 > **Not affiliated with IceWhale.** An independent, community-maintained distribution of CasaOS, not produced or endorsed by Shanghai IceWhale Technology Limited. CASAOS is their trademark, used here only to say what this is a release of. The original project is [IceWhaleTech/CasaOS](https://github.com/IceWhaleTech/CasaOS); report problems with this distribution at [ReCasaOS/CasaOS/issues](https://github.com/ReCasaOS/CasaOS/issues).
