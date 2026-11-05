@@ -104,6 +104,11 @@ type Mover struct {
 	Run func(ctx context.Context, name string, args ...string) (string, error)
 	// StatFS says a folder's file system and free space; tests replace it.
 	StatFS func(path string) (fsType string, freeBytes int64, err error)
+	// Copy copies a live folder into its new place; tests replace it.
+	Copy func(ctx context.Context, src, dst string) error
+	// Wait is how long Docker and the containers get to come back after a
+	// switch, Poll how often they are asked; zero: 2 minutes, 2 seconds.
+	Wait, Poll time.Duration
 
 	mu    sync.Mutex
 	state State
@@ -111,6 +116,7 @@ type Mover struct {
 
 func New(statePath string) *Mover {
 	m := &Mover{StatePath: statePath, Run: run, StatFS: statFS}
+	m.Copy = m.copyTree
 	m.load()
 	return m
 }
@@ -448,8 +454,15 @@ func (m *Mover) move(target string) {
 	running := m.runningContainers(ctx)
 	images := m.imageCount(ctx)
 
-	if err := m.stopServices(ctx); err != nil {
+	// Docker back where it was, with the containers that ran: a container
+	// without a restart policy does not come back with Docker alone
+	restart := func() {
 		m.startServices(ctx)
+		m.startContainers(ctx, running)
+	}
+
+	if err := m.stopServices(ctx); err != nil {
+		restart()
 		fail(fmt.Errorf("stop Docker: %w", err))
 		return
 	}
@@ -458,7 +471,7 @@ func (m *Mover) move(target string) {
 	// be copied as it looks from above, and pin the old folder
 	for _, a := range areas {
 		if err := m.unmountUnder(ctx, a.live, false); err != nil {
-			m.startServices(ctx)
+			restart()
 			fail(fmt.Errorf("unmount what Docker left mounted: %w", err))
 			return
 		}
@@ -475,9 +488,9 @@ func (m *Mover) move(target string) {
 			dst = a.live + newSuffix
 		}
 		copied = append(copied, dst)
-		if err := m.copyTree(ctx, a.live, dst); err != nil {
+		if err := m.copy(ctx, a.live, dst); err != nil {
 			m.removeAll(copied)
-			m.startServices(ctx)
+			restart()
 			fail(fmt.Errorf("copy %s: %w", a.live, err))
 			return
 		}
@@ -492,7 +505,7 @@ func (m *Mover) move(target string) {
 	if err != nil {
 		undo()
 		m.removeAll(copied)
-		m.startServices(ctx)
+		restart()
 		fail(fmt.Errorf("switch to %s: %w", target, err))
 		return
 	}
@@ -502,8 +515,7 @@ func (m *Mover) move(target string) {
 		_ = m.stopServices(ctx)
 		undo()
 		m.removeAll(copied)
-		m.startServices(ctx)
-		m.startContainers(ctx, running)
+		restart()
 		fail(fmt.Errorf("Docker did not come back in %s, so everything is as it was: %w", target, err))
 		return
 	}
@@ -540,6 +552,13 @@ func (m *Mover) startServices(ctx context.Context) {
 // copyTree copies src into dst keeping owners, modes, links, ACLs and
 // extended attributes; rsync reports how far it is.
 var progress2 = regexp.MustCompile(`^\s*([0-9,]+)\s+\d+%`)
+
+func (m *Mover) copy(ctx context.Context, src, dst string) error {
+	if m.Copy != nil {
+		return m.Copy(ctx, src, dst)
+	}
+	return m.copyTree(ctx, src, dst)
+}
 
 func (m *Mover) copyTree(ctx context.Context, src, dst string) error {
 	if err := os.MkdirAll(m.path(dst), 0o711); err != nil {
@@ -735,16 +754,28 @@ func restore(path string, content []byte) {
 func (m *Mover) startAndVerify(ctx context.Context, target string, running []string, images int) error {
 	m.startServices(ctx)
 
-	deadline := time.Now().Add(2 * time.Minute)
+	wait, poll := m.Wait, m.Poll
+	if wait == 0 {
+		wait = 2 * time.Minute
+	}
+	if poll == 0 {
+		poll = 2 * time.Second
+	}
+	deadline := time.Now().Add(wait)
 	var err error
-	for time.Now().Before(deadline) {
+	answered := false
+	for !answered && time.Now().Before(deadline) {
 		var out string
 		if out, err = m.Run(ctx, "docker", "info", "--format", "{{.DockerRootDir}}"); err == nil && strings.TrimSpace(out) != "" {
+			answered = true
 			break
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(poll)
 	}
-	if err != nil {
+	if !answered {
+		if err == nil {
+			err = errors.New("no answer")
+		}
 		return fmt.Errorf("Docker does not answer: %w", err)
 	}
 
@@ -758,7 +789,7 @@ func (m *Mover) startAndVerify(ctx context.Context, target string, running []str
 		if missing := without(running, now); len(missing) == 0 {
 			return nil
 		}
-		time.Sleep(3 * time.Second)
+		time.Sleep(poll)
 	}
 	return fmt.Errorf("these containers did not start again: %s", strings.Join(without(running, m.runningContainers(ctx)), ", "))
 }
