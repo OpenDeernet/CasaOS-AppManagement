@@ -664,3 +664,53 @@ func (a *AppManagement) BackupSystem(ctx echo.Context) error {
 		Message: utils.Ptr(fmt.Sprintf("backing this box up to `%s` as `%s`", request.Destination, stamp)),
 	})
 }
+
+// BackupSignIn starts a sign-in to a cloud drive and returns the address to open.
+func (a *AppManagement) BackupSignIn(ctx echo.Context) error {
+	var spec codegen.BackupSignInSpec
+	if err := ctx.Bind(&spec); err != nil {
+		message := err.Error()
+		return ctx.JSON(http.StatusBadRequest, codegen.ResponseBadRequest{Message: &message})
+	}
+
+	address, err := rclone.SignIn(string(spec.Backend))
+	if err != nil {
+		return signInError(ctx, err)
+	}
+
+	return ctx.JSON(http.StatusOK, codegen.BackupSignInOK{
+		Message: utils.Ptr("OK"),
+		Data:    &codegen.BackupSignInLink{Url: &address},
+	})
+}
+
+// BackupSignInFinish trades the page the provider redirected to for a token.
+func (a *AppManagement) BackupSignInFinish(ctx echo.Context) error {
+	var spec codegen.BackupSignInFinishSpec
+	if err := ctx.Bind(&spec); err != nil {
+		message := err.Error()
+		return ctx.JSON(http.StatusBadRequest, codegen.ResponseBadRequest{Message: &message})
+	}
+
+	token, err := rclone.CompleteSignIn(spec.Redirected)
+	if err != nil {
+		return signInError(ctx, err)
+	}
+
+	return ctx.JSON(http.StatusOK, codegen.BackupSignInFinishOK{
+		Message: utils.Ptr("OK"),
+		Data:    &codegen.BackupSignInToken{Token: &token},
+	})
+}
+
+// signInError answers a mistake in what was sent as a bad request, and anything
+// else -- rclone missing, rclone failing -- as the box's own error.
+func signInError(ctx echo.Context, err error) error {
+	var bad rclone.BadSignIn
+	if errors.As(err, &bad) {
+		message := err.Error()
+		return ctx.JSON(http.StatusBadRequest, codegen.ResponseBadRequest{Message: &message})
+	}
+
+	return backupError(ctx, err)
+}

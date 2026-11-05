@@ -808,6 +808,52 @@ paths:
         "500":
           $ref: "#/components/responses/ResponseInternalServerError"
 
+  /backup/signin:
+    post:
+      summary: Start signing in to a cloud drive from the interface
+      description: |
+        A box has no browser, so this runs `rclone authorize` on it and returns the
+        provider's sign-in address, to be opened in the browser of whoever is using
+        the interface. Once they have signed in the provider redirects to
+        `http://127.0.0.1:53682/`, which does not load on their computer; the
+        address of that page is then sent to `/backup/signin/finish`.
+
+        Only one sign-in waits at a time: starting another replaces it. It expires
+        after ten minutes.
+      operationId: backupSignIn
+      tags:
+        - Backup methods
+      requestBody:
+        $ref: "#/components/requestBodies/RequestBackupSignIn"
+      responses:
+        "200":
+          $ref: "#/components/responses/BackupSignInOK"
+        "400":
+          $ref: "#/components/responses/ResponseBadRequest"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+
+  /backup/signin/finish:
+    post:
+      summary: Finish signing in to a cloud drive
+      description: |
+        Takes the address of the page the provider redirected to after sign-in -- the
+        one that failed to load -- and returns the token rclone obtained with it. The
+        token goes in the `token` option of the destination, as it would if it had
+        come from `rclone authorize`.
+      operationId: backupSignInFinish
+      tags:
+        - Backup methods
+      requestBody:
+        $ref: "#/components/requestBodies/RequestBackupSignInFinish"
+      responses:
+        "200":
+          $ref: "#/components/responses/BackupSignInFinishOK"
+        "400":
+          $ref: "#/components/responses/ResponseBadRequest"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+
   /backup/destinations:
     get:
       summary: List the backup destinations this box knows
@@ -2097,6 +2143,22 @@ components:
           schema:
             $ref: "#/components/schemas/BackupDestinationSpec"
 
+    RequestBackupSignIn:
+      description: The cloud drive to sign in to
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BackupSignInSpec"
+
+    RequestBackupSignInFinish:
+      description: The address of the page the provider redirected to
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BackupSignInFinishSpec"
+
     RequestBackupDestinationRestic:
       description: The password of a repository that is already there; empty for a new one
       required: false
@@ -2591,6 +2653,28 @@ components:
                     items:
                       type: string
                       example: "offsite"
+
+    BackupSignInOK:
+      description: OK
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/BaseResponse"
+              - properties:
+                  data:
+                    $ref: "#/components/schemas/BackupSignInLink"
+
+    BackupSignInFinishOK:
+      description: OK
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/BaseResponse"
+              - properties:
+                  data:
+                    $ref: "#/components/schemas/BackupSignInToken"
 
     BackupDestinationCheckOK:
       description: OK
@@ -3310,6 +3394,38 @@ components:
           example:
             provider: "Wasabi"
             access_key_id: "..."
+
+    BackupSignInSpec:
+      required:
+        - backend
+      properties:
+        backend:
+          type: string
+          description: An rclone backend that signs in through a browser.
+          enum: [drive, dropbox]
+          example: "drive"
+
+    BackupSignInLink:
+      properties:
+        url:
+          type: string
+          description: The provider's sign-in address, to open in a browser.
+
+    BackupSignInFinishSpec:
+      required:
+        - redirected
+      properties:
+        redirected:
+          type: string
+          description: |-
+            The address of the page the provider redirected to, which does not load
+            (`http://127.0.0.1:53682/?state=...&code=...`). Only its query is used.
+
+    BackupSignInToken:
+      properties:
+        token:
+          type: string
+          description: The token to put in the destination's `token` option.
 
     BackupDestinationSpace:
       properties:
