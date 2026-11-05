@@ -220,6 +220,8 @@ func TestBackToDefault(t *testing.T) {
 	}
 	if c := m.CheckTarget(ctx, Default); !c.OK {
 		t.Fatalf("back: %+v", c)
+	} else if c.Path != "/var/lib/docker" {
+		t.Errorf("back: path %q, want /var/lib/docker", c.Path)
 	}
 
 	// the copy back is next to the live folders

@@ -65,8 +65,12 @@ const (
 	newSuffix = ".casaos-new"
 )
 
-// Default is the target that puts Docker's data back in its default place.
-const Default = ""
+// Default is the target that puts Docker's data back in its default place,
+// DefaultDir; a check of it reports DefaultDir as its path.
+const (
+	Default    = ""
+	DefaultDir = "/var/lib/docker"
+)
 
 // State is where Docker's data is, and the move under way or the last one.
 type State struct {
@@ -256,7 +260,7 @@ func (m *Mover) CheckTarget(ctx context.Context, path string) Check {
 	fail := func(reason string) Check { c.Reason = reason; return c }
 
 	if path == Default {
-		c.Path = Default
+		c.Path = DefaultDir
 		if c.Location == "" {
 			return fail("Docker's data is in its default place already")
 		}
@@ -429,11 +433,17 @@ func (m *Mover) Start(target string) (State, error) {
 		return m.State(), errors.New(c.Reason)
 	}
 
+	// the check names DefaultDir, but the move back is asked for as Default
+	to := c.Path
+	if target == Default {
+		to = Default
+	}
+
 	m.set(func(s *State) {
-		*s = State{Phase: PhaseStopping, Location: s.Location, Target: c.Path, TotalBytes: c.UsedBytes, OldCopy: s.OldCopy, StartedAt: now()}
+		*s = State{Phase: PhaseStopping, Location: s.Location, Target: to, TotalBytes: c.UsedBytes, OldCopy: s.OldCopy, StartedAt: now()}
 	})
 
-	go m.move(c.Path)
+	go m.move(to)
 
 	return m.State(), nil
 }
