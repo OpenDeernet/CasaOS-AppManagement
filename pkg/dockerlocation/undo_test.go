@@ -284,3 +284,56 @@ func TestUnitsAreWrittenWhole(t *testing.T) {
 		t.Errorf("%v", names)
 	}
 }
+
+// rsync does not fsync: each copy is flushed to its disk before any unit
+// points at it.
+func TestTheCopyIsOnDiskBeforeTheSwitch(t *testing.T) {
+	m := liveHost(t)
+	d := newFakeDocker(m)
+	m.Copy = copyAll(m, 0, nil)
+
+	if s := runMove(t, m, "/DATA/big"); s.Phase != PhaseDone {
+		t.Fatalf("%+v", s)
+	}
+	firstMount := firstCall(d.calls, func(c string) bool { return strings.HasSuffix(c, ".mount") })
+	for _, a := range areas {
+		i := slices.Index(d.calls, "sync -f "+m.path(filepath.Join("/DATA/big", a.name)))
+		if i < 0 || i > firstMount {
+			t.Errorf("%s flushed at %d, first mount call at %d: %v", a.name, i, firstMount, d.calls)
+		}
+	}
+}
+
+// A switch Recover keeps is checked again; when Docker lost images there,
+// the data from before is kept and not offered for deletion.
+func TestAKeptSwitchMissingImagesKeepsTheOldData(t *testing.T) {
+	m, _ := switchedToFolder(t)
+	b, _ := json.Marshal(State{Phase: PhaseStarting, Target: "/DATA/big", Running: []string{"c1", "c2"}, Images: 5})
+	os.WriteFile(m.StatePath, b, 0o644)
+	m.load()
+
+	m.Recover(context.Background())
+
+	s := m.State()
+	if s.Location != "/DATA/big" || len(s.OldCopy) != 0 {
+		t.Fatalf("old copy offered after a check that failed: %+v", s)
+	}
+	if !strings.Contains(s.Message, "5 images before the move, 3 after") || !strings.Contains(s.Message, oldSuffix) {
+		t.Errorf("message: %s", s.Message)
+	}
+}
+
+// A start that failed and was cut during its undo still says why.
+func TestACutUndoKeepsWhyTheStartFailed(t *testing.T) {
+	m, _ := switchedToFolder(t)
+	b, _ := json.Marshal(State{Phase: PhaseSwitching, Target: "/DATA/big", Running: []string{"c1", "c2"}, Undoing: true,
+		Message: "Docker did not come back in /DATA/big: 3 images before the move, 2 after"})
+	os.WriteFile(m.StatePath, b, 0o644)
+	m.load()
+
+	m.Recover(context.Background())
+
+	if s := m.State(); !strings.Contains(s.Message, "3 images before the move, 2 after") {
+		t.Errorf("the start failure is lost: %s", s.Message)
+	}
+}

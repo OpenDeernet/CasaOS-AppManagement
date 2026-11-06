@@ -95,6 +95,9 @@ type State struct {
 	// containers to start again
 	From    string   `json:"from,omitempty"`
 	Running []string `json:"running,omitempty"`
+	// how many images Docker had before the move, checked again by Recover
+	// on a switch it keeps
+	Images int `json:"images,omitempty"`
 	// set once a failed switch or start is being undone: a stop then leaves a
 	// switch that may look complete, and must be undone, never kept
 	Undoing bool `json:"undoing,omitempty"`
@@ -691,7 +694,7 @@ func (m *Mover) move(target string) {
 	// what runs now, to run again after
 	running := m.runningContainers(ctx)
 	images := m.imageCount(ctx)
-	m.set(func(s *State) { s.TotalBytes, s.Running = u.apparent, running })
+	m.set(func(s *State) { s.TotalBytes, s.Running, s.Images = u.apparent, running, images })
 
 	// Docker back where it was, with the containers that ran: a container
 	// without a restart policy does not come back with Docker alone
@@ -703,8 +706,8 @@ func (m *Mover) move(target string) {
 	// undo puts the switch back; when it cannot, the copy stays and the
 	// message says where the data is
 	undoOrSay := func(undo func() error, copied []string, err error) error {
-		// recorded before anything is undone: Recover finishes the undo
-		m.set(func(s *State) { s.Phase, s.Undoing = PhaseSwitching, true })
+		// recorded before anything is undone, with why: Recover finishes the undo
+		m.set(func(s *State) { s.Phase, s.Undoing, s.Message = PhaseSwitching, true, err.Error() })
 		if undoErr := undo(); undoErr != nil {
 			restart()
 			return fmt.Errorf("%w; putting it back failed too (%v), so nothing was deleted: the data Docker had is in %s, the copy in %s",
@@ -744,6 +747,18 @@ func (m *Mover) move(target string) {
 		}
 	}
 
+	// rsync does not fsync: the copy reaches the disk before anything points
+	// at it, or a power cut soon after could keep a switch onto files the
+	// disk never got, with the intact data offered for deletion
+	for _, d := range copied {
+		if _, err := m.Run(ctx, "sync", "-f", m.path(d)); err != nil {
+			m.removeAll(copied)
+			restart()
+			fail(fmt.Errorf("flush the copy %s to disk: %w", d, err))
+			return
+		}
+	}
+
 	m.set(func(s *State) { s.Phase = PhaseSwitching })
 	switchTo := m.switchMounts
 	if target == Default {
@@ -762,7 +777,10 @@ func (m *Mover) move(target string) {
 	if err := m.startAndVerify(ctx, running, images); err != nil {
 		// an undo under way from here on: a stop before it ends, even before
 		// it starts, is undone by Recover, never kept as a move that worked
-		m.set(func(s *State) { s.Phase, s.Undoing = PhaseSwitching, true })
+		m.set(func(s *State) {
+			s.Phase, s.Undoing = PhaseSwitching, true
+			s.Message = fmt.Sprintf("Docker did not come back in %s: %v", place(target), err)
+		})
 		if qerr := m.quiesce(ctx); qerr != nil {
 			restart()
 			fail(fmt.Errorf("Docker did not come back in %s: %w; it could not be stopped to put things back (%v), so nothing was undone: the data is in %s, the data Docker had before in %s",
@@ -870,12 +888,15 @@ func (m *Mover) stopServices(ctx context.Context) error {
 			return err
 		}
 	}
-	// a socket that would not stop (or a box without one) answers here:
-	// is-active prints one state a unit, and fails when any is not active
-	out, _ := m.Run(ctx, "systemctl", append([]string{"is-active"}, units...)...)
-	for i, state := range strings.Fields(out) {
-		if i < len(units) && (state == "active" || state == "activating" || state == "reloading") {
-			return fmt.Errorf("%s is still %s", units[i], state)
+	// a socket that would not stop (or a box without one) answers here, one
+	// unit at a time: the output mixes in stderr, so a warning line cannot
+	// shift one unit's state onto another
+	for _, unit := range units {
+		out, _ := m.Run(ctx, "systemctl", "is-active", unit)
+		for _, state := range []string{"active", "activating", "reloading"} {
+			if slices.Contains(strings.Fields(out), state) {
+				return fmt.Errorf("%s is still %s", unit, state)
+			}
 		}
 	}
 	return nil
@@ -1494,6 +1515,9 @@ func (m *Mover) Recover(ctx context.Context) {
 				err = m.dropCopies(ctx, from, target)
 			}
 			why = "while switching to the new place; it was put back where the data was"
+			if cut.Undoing && cut.Message != "" {
+				why += " (" + cut.Message + ")"
+			}
 		} else { // stopping, copying
 			err = m.dropCopies(ctx, from, target)
 			why = "while Docker was stopped for the copy; the partial copy was deleted and nothing else changed"
@@ -1503,15 +1527,30 @@ func (m *Mover) Recover(ctx context.Context) {
 		}
 	}
 
-	m.startServices(ctx)
-	m.startContainers(ctx, cut.Running)
+	// a kept switch was never checked: Docker must find the images it had
+	var unchecked error
+	if kept {
+		unchecked = m.startAndVerify(ctx, cut.Running, cut.Images)
+	} else {
+		m.startServices(ctx)
+		m.startContainers(ctx, cut.Running)
+	}
 
 	msg := "the move was interrupted " + why + ": check that the apps run"
 	if err != nil {
 		msg = fmt.Sprintf("the move was interrupted %s, and putting it right failed (%v): Docker was started again; check where its data is before anything else", why, err)
 	}
 	if kept {
+		old := m.oldCopy(from)
 		m.finish(from, m.location())
+		if unchecked != nil {
+			// the data from before may be the only good copy: it stays on
+			// disk, and is not offered for deletion
+			m.set(func(s *State) {
+				s.OldCopy = slices.DeleteFunc(s.OldCopy, func(p string) bool { return slices.Contains(old, p) })
+			})
+			msg += fmt.Sprintf("; Docker could not be checked in its new place (%v): the data it had before is kept in %s", unchecked, strings.Join(old, ", "))
+		}
 	}
 	m.set(func(s *State) {
 		if !kept {
