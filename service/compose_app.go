@@ -342,6 +342,7 @@ func (a *ComposeApp) applyUpdate(ctx context.Context, newComposeYAML []byte) err
 	MyService.AppStoreManagement().StartUpgrade(a.Name)
 	defer MyService.AppStoreManagement().FinishUpgrade(a.Name)
 
+	before := mainImage(a)
 	if err := a.PullAndApply(ctx, newComposeYAML); err != nil {
 		go PublishEventWrapper(ctx, common.EventTypeAppUpdateError, map[string]string{
 			common.PropertyTypeMessage.Name: err.Error(),
@@ -350,6 +351,12 @@ func (a *ComposeApp) applyUpdate(ctx context.Context, newComposeYAML []byte) err
 		logger.Error("failed to update compose app", zap.Error(err), zap.String("name", a.Name))
 		return err
 	}
+	// a is still the app before the update: the image after is the one in the files just applied
+	after := ""
+	if updated, err := LoadComposeAppFromConfigFile(a.Name, strings.Join(a.ComposeFiles, ",")); err == nil {
+		after = mainImage(updated)
+	}
+	RecordAppEvent(a.Name, "updated", before, after, "")
 
 	// The update applied. app:update-end is published whether this succeeded or
 	// failed, so without this it says nothing at all and the dashboard has no
@@ -602,6 +609,7 @@ func (a *ComposeApp) Containers(ctx context.Context) (map[string][]api.Container
 func (a *ComposeApp) Pull(ctx context.Context) error {
 	serviceNames := pullServiceNames(ctx, a.Services)
 	serviceNum := len(serviceNames)
+	pulled := serviceNum > 0 // a failed pull is published, not returned
 
 	for i, name := range serviceNames {
 		app := a.Services[name]
@@ -621,6 +629,7 @@ func (a *ComposeApp) Pull(ctx context.Context) error {
 					common.PropertyTypeImageName.Name: app.Image,
 					common.PropertyTypeMessage.Name:   err.Error(),
 				})
+				pulled = false
 			}
 
 			return nil
@@ -629,6 +638,9 @@ func (a *ComposeApp) Pull(ctx context.Context) error {
 		}
 	}
 
+	if pulled {
+		RecordAppEvent(a.Name, "image-pulled", "", mainImage(a), "")
+	}
 	return nil
 }
 

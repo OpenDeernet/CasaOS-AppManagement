@@ -137,7 +137,9 @@ func (s *ComposeService) Install(ctx context.Context, composeApp *ComposeApp, en
 			})
 
 			logger.Error("failed to install compose app", zap.Error(err), zap.String("name", composeApp.Name))
+			return
 		}
+		RecordAppEvent(composeApp.Name, "installed", "", mainImage(composeApp), "")
 	}(ctx)
 
 	return nil
@@ -178,7 +180,9 @@ func (s *ComposeService) Uninstall(ctx context.Context, composeApp *ComposeApp, 
 			})
 
 			logger.Error("failed to uninstall compose app", zap.Error(err), zap.String("name", composeApp.Name))
+			return
 		}
+		RecordAppEvent(composeApp.Name, "uninstalled", "", "", "")
 	}(ctx)
 
 	return nil

@@ -59,6 +59,12 @@ func isStatsRulesPut(c echo.Context) bool {
 	return c.Request().Method == http.MethodPut && c.Path() == V2APIPath+"/stats/:id/alerts"
 }
 
+// isLogsStream is the one route that takes its token from the query: a browser's
+// WebSocket cannot send a header.
+func isLogsStream(c echo.Context) bool {
+	return c.Request().Method == http.MethodGet && c.Path() == V2APIPath+"/logs/stream"
+}
+
 func InitV2Router() http.Handler {
 	appManagement := v2Route.NewAppManagement()
 
@@ -93,7 +99,11 @@ func InitV2Router() http.Handler {
 		},
 		TokenLookupFuncs: []echo_middleware.ValuesExtractor{
 			func(c echo.Context) ([]string, error) {
-				return []string{jwt.TokenFromAuthorization(c.Request().Header.Get(echo.HeaderAuthorization))}, nil
+				authorization := c.Request().Header.Get(echo.HeaderAuthorization)
+				if authorization == "" && isLogsStream(c) {
+					return []string{c.QueryParam("token")}, nil
+				}
+				return []string{jwt.TokenFromAuthorization(authorization)}, nil
 			},
 		},
 	}))

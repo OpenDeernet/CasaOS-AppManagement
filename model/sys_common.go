@@ -18,6 +18,13 @@ type APPModel struct {
 	// healthy after it is started. Zero (the key absent) keeps the built-in default.
 	// A duration with a unit: "5m", "20m".
 	UpWaitTimeout time.Duration
+
+	// The apps' logs: where they are kept, for how long and up to what size, and whether
+	// the containers of no app are kept too.
+	LogsPath          string
+	LogsRetentionDays int
+	LogsMaxSizeMB     int
+	LogsIncludeOthers bool
 }
 
 type ServerModel struct {

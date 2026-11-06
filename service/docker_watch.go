@@ -242,7 +242,10 @@ func (w *dockerWatch) follow(ctx context.Context) error {
 
 	messages, errs := cli.Events(ctx, events.ListOptions{Filters: filters.NewArgs(
 		filters.Arg("type", string(events.ContainerEventType)),
-		filters.Arg("label", api.ProjectLabel),
+		// every container's, not only the apps': the logs collector records them all
+		filters.Arg("event", string(events.ActionCreate)),
+		filters.Arg("event", string(events.ActionStop)),
+		filters.Arg("event", string(events.ActionOOM)),
 		filters.Arg("event", string(events.ActionDie)),
 		filters.Arg("event", string(events.ActionKill)),
 		filters.Arg("event", string(events.ActionStart)),
@@ -279,9 +282,18 @@ func (w *dockerWatch) follow(ctx context.Context) error {
 		case now := <-ticker.C:
 			out = w.tick(now)
 		case m := <-messages:
+			if f := onDockerEvent.Load(); f != nil {
+				(*f)(m)
+			}
+
 			app := m.Actor.Attributes[api.ProjectLabel]
 			// a one-off container is somebody's `docker compose run`, not the app
 			if app == "" || m.Actor.Attributes[api.OneoffLabel] == "True" {
+				continue
+			}
+			// widened for the logs collector only: observe decides on what it always had
+			switch m.Action {
+			case events.ActionCreate, events.ActionStop, events.ActionOOM:
 				continue
 			}
 
@@ -296,6 +308,9 @@ func (w *dockerWatch) follow(ctx context.Context) error {
 
 		// never held up by the message bus: the next event is already on its way
 		for _, p := range out {
+			if f := onWatchPublished.Load(); f != nil {
+				(*f)(p)
+			}
 			go PublishEventWrapper(ctx, p.eventType, p.properties)
 		}
 	}

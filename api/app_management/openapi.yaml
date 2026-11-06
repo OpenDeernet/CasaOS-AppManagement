@@ -40,6 +40,10 @@ tags:
     description: |-
       resource history of every container, sampled every five seconds and kept seven days
 
+  - name: Logs methods
+    description: |-
+      every app container's lines and events, kept on /DATA, live and searchable
+
   - name: Internal methods
     description: |-
       methods for internal use ONLY
@@ -106,6 +110,7 @@ x-tagGroups:
       - Image methods
       - Git methods
       - Stats methods
+      - Logs methods
 
   - name: Schemas
     tags:
@@ -1852,6 +1857,156 @@ paths:
         "503":
           $ref: "#/components/responses/ResponseServiceUnavailable"
 
+  /logs/apps:
+    get:
+      summary: The apps and services that have logs
+      description: |
+        Every app with a log on disk, its title and icon when it is installed, and per
+        service the current container, whether it is followed now, the first and last
+        line's time and the bytes kept. `_other` holds the containers of no app.
+        Errors: 503 while the logs store is not open.
+      operationId: logsApps
+      tags:
+        - Logs methods
+      responses:
+        "200":
+          $ref: "#/components/responses/LogsAppsOK"
+        "503":
+          $ref: "#/components/responses/ResponseServiceUnavailable"
+
+  /logs:
+    get:
+      summary: One page of log lines, with the events of the same window
+      description: |
+        Newest first from `until` (or now), older pages with `before`; oldest first with
+        `since`. `next` is the cursor of the page's last line, empty when nothing is left.
+        `events` are the matching apps' events between the page's two ends.
+        Errors: 400 on a bad cursor, a bad regex, or `since` with `before`; 503 while
+        the logs store is not open.
+      operationId: logsQuery
+      tags:
+        - Logs methods
+      parameters:
+        - $ref: "#/components/parameters/LogsFilterApp"
+        - $ref: "#/components/parameters/LogsFilterService"
+        - $ref: "#/components/parameters/LogsFilterStream"
+        - $ref: "#/components/parameters/LogsFilterLevel"
+        - $ref: "#/components/parameters/LogsFilterQ"
+        - $ref: "#/components/parameters/LogsFilterRegex"
+        - $ref: "#/components/parameters/LogsSince"
+        - $ref: "#/components/parameters/LogsUntil"
+        - $ref: "#/components/parameters/LogsBefore"
+        - $ref: "#/components/parameters/LogsLimit"
+      responses:
+        "200":
+          $ref: "#/components/responses/LogsPageOK"
+        "400":
+          $ref: "#/components/responses/ResponseBadRequest"
+        "503":
+          $ref: "#/components/responses/ResponseServiceUnavailable"
+
+  /logs/stream:
+    get:
+      summary: The new lines and events, live (WebSocket)
+      description: |
+        A WebSocket: each message is one JSON object `{t, line?, event?, dropped?}`,
+        `t` being `line`, `event` or `lag` (`dropped` messages were lost because the
+        client read too slowly). The server pings every 30 s. A browser cannot send a
+        header on a WebSocket: the JWT goes in `token`, which no other route accepts.
+        Errors: 400 on a bad filter, 503 while the logs store is not open.
+      operationId: logsStream
+      tags:
+        - Logs methods
+      parameters:
+        - $ref: "#/components/parameters/LogsFilterApp"
+        - $ref: "#/components/parameters/LogsFilterService"
+        - $ref: "#/components/parameters/LogsFilterStream"
+        - $ref: "#/components/parameters/LogsFilterLevel"
+        - $ref: "#/components/parameters/LogsFilterQ"
+        - $ref: "#/components/parameters/LogsFilterRegex"
+        - $ref: "#/components/parameters/LogsToken"
+      responses:
+        "101":
+          description: Switching Protocols to a WebSocket
+        "400":
+          $ref: "#/components/responses/ResponseBadRequest"
+        "503":
+          $ref: "#/components/responses/ResponseServiceUnavailable"
+
+  /logs/events:
+    get:
+      summary: The apps' events, newest first
+      description: |
+        Errors: 503 while the logs store is not open.
+      operationId: logsEvents
+      tags:
+        - Logs methods
+      parameters:
+        - $ref: "#/components/parameters/LogsFilterApp"
+        - $ref: "#/components/parameters/LogsEventKind"
+        - $ref: "#/components/parameters/LogsEventSince"
+        - $ref: "#/components/parameters/LogsUntil"
+        - $ref: "#/components/parameters/LogsLimit"
+      responses:
+        "200":
+          $ref: "#/components/responses/LogsEventsOK"
+        "503":
+          $ref: "#/components/responses/ResponseServiceUnavailable"
+
+  /logs/export:
+    get:
+      summary: Download the matching lines as text, oldest first
+      description: |
+        One line per log line, as kept on disk (`<time> <o|e> <text>`), prefixed with
+        `[app/service] ` when several services are exported. Events are not exported.
+        Errors: 400 on a bad cursor or a bad regex, 503 while the logs store is not open.
+      operationId: logsExport
+      tags:
+        - Logs methods
+      parameters:
+        - $ref: "#/components/parameters/LogsFilterApp"
+        - $ref: "#/components/parameters/LogsFilterService"
+        - $ref: "#/components/parameters/LogsFilterStream"
+        - $ref: "#/components/parameters/LogsFilterLevel"
+        - $ref: "#/components/parameters/LogsFilterQ"
+        - $ref: "#/components/parameters/LogsFilterRegex"
+        - $ref: "#/components/parameters/LogsSince"
+        - $ref: "#/components/parameters/LogsUntil"
+      responses:
+        "200":
+          $ref: "#/components/responses/LogsExportOK"
+        "400":
+          $ref: "#/components/responses/ResponseBadRequest"
+        "503":
+          $ref: "#/components/responses/ResponseServiceUnavailable"
+
+  /logs/settings:
+    get:
+      summary: The logs' retention, size cap and where they are kept
+      operationId: getLogsSettings
+      tags:
+        - Logs methods
+      responses:
+        "200":
+          $ref: "#/components/responses/LogsSettingsOK"
+
+    put:
+      summary: Change the logs' retention and size cap
+      description: |
+        Saved at once, then the old logs are purged. Errors: 400 on a value out of range.
+      operationId: setLogsSettings
+      tags:
+        - Logs methods
+      requestBody:
+        $ref: "#/components/requestBodies/RequestLogsSettings"
+      responses:
+        "200":
+          $ref: "#/components/responses/LogsSettingsOK"
+        "400":
+          $ref: "#/components/responses/ResponseBadRequest"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+
 components:
   securitySchemes:
     access_token:
@@ -2068,6 +2223,112 @@ components:
         type: string
         example: "1h"
 
+    LogsFilterApp:
+      name: app
+      description: Only these apps (repeat the parameter for several); all when absent.
+      in: query
+      style: form
+      explode: true
+      schema:
+        type: array
+        items:
+          type: string
+
+    LogsFilterService:
+      name: service
+      description: Only these services (repeat the parameter for several); all when absent.
+      in: query
+      style: form
+      explode: true
+      schema:
+        type: array
+        items:
+          type: string
+
+    LogsFilterStream:
+      name: stream
+      description: "`o` stdout only, `e` stderr only."
+      in: query
+      schema:
+        type: string
+        enum: ["o", "e"]
+
+    LogsFilterLevel:
+      name: level
+      description: The minimum level, guessed from each line's text and stream.
+      in: query
+      schema:
+        type: string
+        enum: ["info", "warn", "error"]
+
+    LogsFilterQ:
+      name: q
+      description: Text the line contains, case-insensitive; a regular expression with `regex`.
+      in: query
+      schema:
+        type: string
+
+    LogsFilterRegex:
+      name: regex
+      in: query
+      schema:
+        type: boolean
+
+    LogsSince:
+      name: since
+      description: A line's cursor; the lines after it, oldest first.
+      in: query
+      schema:
+        type: string
+
+    LogsUntil:
+      name: until
+      in: query
+      schema:
+        type: string
+        format: date-time
+
+    LogsBefore:
+      name: before
+      description: A line's cursor (a page's `next`); the lines before it, newest first.
+      in: query
+      schema:
+        type: string
+
+    LogsLimit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        default: 500
+
+    LogsToken:
+      name: token
+      description: The JWT, for a browser's WebSocket, which cannot send a header.
+      in: query
+      schema:
+        type: string
+
+    LogsEventKind:
+      name: kind
+      description: Only these kinds (repeat the parameter for several); all when absent.
+      in: query
+      style: form
+      explode: true
+      schema:
+        type: array
+        items:
+          type: string
+
+    LogsEventSince:
+      name: since
+      in: query
+      schema:
+        type: string
+        format: date-time
+
   requestBodies:
     RequestGitAppCreate:
       required: true
@@ -2227,6 +2488,13 @@ components:
                 type: array
                 items:
                   $ref: "#/components/schemas/StatsRule"
+
+    RequestLogsSettings:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LogsSettingsInput"
 
   responses:
     ResponseOK:
@@ -2810,6 +3078,67 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/StatsAlerts"
+
+
+    LogsAppsOK:
+      description: OK
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/BaseResponse"
+              - properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/LogsApp"
+
+    LogsPageOK:
+      description: OK
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/BaseResponse"
+              - properties:
+                  data:
+                    $ref: "#/components/schemas/LogsPage"
+
+    LogsEventsOK:
+      description: OK
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/BaseResponse"
+              - properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/LogEvent"
+
+    LogsExportOK:
+      description: OK
+      headers:
+        Content-Disposition:
+          description: '`attachment; filename="recasaos-logs-<app|all>-<since|start>-<until|now>.log"`'
+          schema:
+            type: string
+      content:
+        text/plain:
+          schema:
+            type: string
+
+    LogsSettingsOK:
+      description: OK
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/BaseResponse"
+              - properties:
+                  data:
+                    $ref: "#/components/schemas/LogsSettings"
 
   schemas:
     BaseResponse:
@@ -4718,3 +5047,151 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/StatsAlert"
+
+    LogLine:
+      type: object
+      required: [at, app, service, container, stream, text]
+      properties:
+        at:
+          type: string
+          format: date-time
+        app:
+          type: string
+        service:
+          type: string
+        container:
+          description: The container id's first 12 characters.
+          type: string
+        stream:
+          description: "`o` stdout, `e` stderr."
+          type: string
+        text:
+          type: string
+        cursor:
+          description: Where the line is, to pass as `since` or `before`. In history pages only, never on the stream.
+          type: string
+
+    LogEvent:
+      type: object
+      required: [at, app, service, container, kind, by]
+      properties:
+        at:
+          type: string
+          format: date-time
+        app:
+          type: string
+        service:
+          type: string
+        container:
+          type: string
+        kind:
+          description: |
+            `created`, `started`, `stopped`, `died`, `oom-killed`, `restarting`, `unhealthy`,
+            `healthy`, `installed`, `uninstalled`, `updated` or `image-pulled`.
+          type: string
+        exit_code:
+          type: string
+        from_image:
+          type: string
+        to_image:
+          type: string
+        by:
+          description: "`operation` (done through ReCasaOS) or `docker`."
+          type: string
+        detail:
+          type: string
+
+    LogsPage:
+      type: object
+      required: [lines, events, next]
+      properties:
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/LogLine"
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/LogEvent"
+        next:
+          description: The cursor of the next page, empty when nothing is left.
+          type: string
+
+    LogsService:
+      type: object
+      required: [service, container, running, first_at, last_at, size_bytes]
+      properties:
+        service:
+          type: string
+        container:
+          type: string
+        running:
+          description: The container is followed now.
+          type: boolean
+        first_at:
+          type: string
+          format: date-time
+        last_at:
+          type: string
+          format: date-time
+        size_bytes:
+          type: integer
+          format: int64
+
+    LogsApp:
+      type: object
+      required: [app, title, icon, uninstalled, services]
+      properties:
+        app:
+          type: string
+        title:
+          description: The app's title by language, null when it is not installed.
+          type: object
+          nullable: true
+          additionalProperties:
+            type: string
+        icon:
+          type: string
+          nullable: true
+        uninstalled:
+          type: boolean
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/LogsService"
+
+    LogsSettingsInput:
+      type: object
+      required: [retention_days, max_size_mb, include_others]
+      properties:
+        retention_days:
+          type: integer
+          minimum: 1
+          maximum: 3650
+        max_size_mb:
+          type: integer
+          minimum: 64
+          maximum: 1048576
+        include_others:
+          description: Also keep the logs of the containers of no app.
+          type: boolean
+
+    LogsSettings:
+      type: object
+      required: [retention_days, max_size_mb, include_others, used_mb, oldest_at, path]
+      properties:
+        retention_days:
+          type: integer
+        max_size_mb:
+          type: integer
+        include_others:
+          type: boolean
+        used_mb:
+          type: number
+          format: double
+        oldest_at:
+          type: string
+          format: date-time
+          nullable: true
+        path:
+          type: string

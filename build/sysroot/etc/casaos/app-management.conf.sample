@@ -10,6 +10,11 @@ AppsPath = /var/lib/casaos/apps
 ; how long an app is given to report itself running or healthy after it is started,
 ; before it is reported as started but not confirmed. Needs a unit. Default 5m.
 ; UpWaitTimeout = 5m
+; where the apps' logs are kept (one file per container and day), 7 days / 2048 MB by default
+; LogsPath = /DATA/AppData/casaos/logs
+; LogsRetentionDays = 7
+; LogsMaxSizeMB = 2048
+; LogsIncludeOthers = false
 
 [server]
 appstore = https://cdn.jsdelivr.net/gh/IceWhaleTech/CasaOS-AppStore@gh-pages/store/main.zip

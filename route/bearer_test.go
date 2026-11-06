@@ -19,8 +19,7 @@ func TestTheAccessTokenIsTakenBareOrAsBearer(t *testing.T) {
 	r := newStatsRig(t)
 	r.ticks(1)
 
-	privateKey, publicKey, err := jwt.GenerateKeyPair()
-	assert.NilError(t, err)
+	privateKey, publicKey := testUserKey()
 	jwks, err := jwt.GenerateJwksJSON(publicKey)
 	assert.NilError(t, err)
 	userService := httptest.NewServer(jwt.JWKSHandler(jwks))

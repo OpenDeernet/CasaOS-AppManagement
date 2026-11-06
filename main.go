@@ -23,6 +23,7 @@ import (
 	"github.com/ReCasaOS/CasaOS-Common/utils/file"
 	"github.com/ReCasaOS/CasaOS-Common/utils/logger"
 	"github.com/coreos/go-systemd/daemon"
+	client2 "github.com/docker/docker/client"
 	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
 
@@ -212,6 +213,16 @@ func main() {
 	// at most the minute in progress: the history files are crash-safe.
 	if err := service.StartStats(ctx); err != nil {
 		logger.Error("the stats sampler did not start, the stats routes answer 503", zap.Error(err))
+	}
+
+	// Every app container's lines and events, kept on /DATA. The store opens in the
+	// background: /DATA may not be mounted yet.
+	dockerClient, err := client2.NewClientWithOpts(client2.FromEnv, client2.WithAPIVersionNegotiation())
+	if err == nil {
+		err = service.StartLogs(ctx, dockerClient)
+	}
+	if err != nil {
+		logger.Error("the logs collector did not start, the logs routes answer 503", zap.Error(err))
 	}
 
 	// setup listener

@@ -26,6 +26,10 @@ var (
 		LogPath:      constants.DefaultLogPath,
 		LogSaveName:  common.AppManagementServiceName,
 		LogFileExt:   "log",
+
+		LogsPath:          "/DATA/AppData/casaos/logs",
+		LogsRetentionDays: 7,
+		LogsMaxSizeMB:     2048,
 	}
 
 	ServerInfo = &model.ServerModel{
