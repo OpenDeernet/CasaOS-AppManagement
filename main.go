@@ -260,6 +260,9 @@ func main() {
 		}
 	}
 
+	// a move of Docker's data cut short by a stop of this service
+	v1.RecoverDockerLocation()
+
 	v1Router := route.InitV1Router()
 	v2Router := route.InitV2Router()
 	v1DocRouter := route.InitV1DocRouter(_docHTMLV1, _docYAMLV1)

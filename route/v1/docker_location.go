@@ -1,6 +1,7 @@
 package v1
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"sync"
@@ -22,6 +23,13 @@ var (
 func dockerLocation() *dockerlocation.Mover {
 	dockerLocationOnce.Do(func() { dockerLocationMover = dockerlocation.New(dockerLocationStatePath) })
 	return dockerLocationMover
+}
+
+// RecoverDockerLocation finishes or undoes, in the background, a move of
+// Docker's data that a stop of this service cut short: Docker is never left
+// stopped by it.
+func RecoverDockerLocation() {
+	go dockerLocation().Recover(context.Background())
 }
 
 func dockerLocationOK(ctx echo.Context, data interface{}) error {

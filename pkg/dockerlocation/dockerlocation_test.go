@@ -23,9 +23,13 @@ func host(t *testing.T) *Mover {
 		Root:      root,
 		StatePath: filepath.Join(root, "/var/lib/casaos/docker-location.json"),
 		Run: func(ctx context.Context, name string, args ...string) (string, error) {
+			if name == "docker" && len(args) > 0 && args[0] == "info" {
+				return "/var/lib/docker\n", nil
+			}
 			return "", nil
 		},
-		StatFS: func(path string) (string, int64, error) { return "ext4", 100 << 30, nil },
+		SameDir: func(a, b string) bool { return a == b },
+		StatFS:  func(path string) (string, int64, error) { return "ext4", 100 << 30, nil },
 	}
 	m.load()
 	return m
@@ -137,7 +141,9 @@ func TestSwitchFromDefaultAndUndo(t *testing.T) {
 		t.Errorf("old copy %v", got)
 	}
 
-	undo()
+	if err := undo(); err != nil {
+		t.Fatal(err)
+	}
 	if b, err := os.ReadFile(m.path("/var/lib/docker/volumes/marker")); err != nil || string(b) != "old" {
 		t.Error("undo did not put the data back")
 	}
@@ -244,7 +250,9 @@ func TestBackToDefault(t *testing.T) {
 		t.Errorf("location %q", m.location())
 	}
 
-	undo()
+	if err := undo(); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(m.path(unitPath("var-lib-docker.mount"))); err != nil {
 		t.Error("undo did not put the unit back")
 	}

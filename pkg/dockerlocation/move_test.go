@@ -25,11 +25,27 @@ type fakeDocker struct {
 	images  int
 	refuse  func() bool
 	calls   []string
+	// the mount units mounted now, and the ones whose stop fails (the
+	// folder is busy)
+	mounted map[string]bool
+	busy    map[string]bool
 }
 
 func newFakeDocker(m *Mover) *fakeDocker {
-	d := &fakeDocker{m: m, up: true, running: []string{"c1", "c2"}, images: 3}
+	d := &fakeDocker{m: m, up: true, running: []string{"c1", "c2"}, images: 3, mounted: map[string]bool{}, busy: map[string]bool{}}
 	m.Run = d.run
+	// a live folder is its copy while its unit is mounted, as a bind mount shows it
+	m.SameDir = func(a, b string) bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		for _, ar := range areas {
+			if ar.live == a && d.mounted[ar.unit] {
+				unit, _ := os.ReadFile(m.path(unitPath(ar.unit)))
+				return unitValue(string(unit), "What") == b
+			}
+		}
+		return a == b
+	}
 	m.Wait, m.Poll = 200*time.Millisecond, time.Millisecond
 	return d
 }
@@ -45,6 +61,22 @@ func (d *fakeDocker) run(_ context.Context, name string, args ...string) (string
 			d.up, d.running = false, nil
 		} else if args[0] == "start" {
 			d.up = true
+		}
+		return "", nil
+	case name == "systemctl" && strings.HasSuffix(args[len(args)-1], ".mount"):
+		unit := args[len(args)-1]
+		switch args[0] {
+		case "stop":
+			if d.busy[unit] {
+				return "", errors.New("umount: target is busy")
+			}
+			d.mounted[unit] = false
+		case "start":
+			d.mounted[unit] = true
+		case "enable":
+			if slices.Contains(args, "--now") {
+				d.mounted[unit] = true
+			}
 		}
 		return "", nil
 	case name == "systemctl":
@@ -146,7 +178,7 @@ func runMove(t *testing.T, m *Mover, target string) State {
 	return m.State()
 }
 
-func exists(m *Mover, p string) bool {
+func there(m *Mover, p string) bool {
 	_, err := os.Stat(m.path(p))
 	return err == nil
 }
@@ -165,11 +197,11 @@ func asBefore(t *testing.T, m *Mover, d *fakeDocker, target string) {
 		"/var/lib/docker" + oldSuffix, "/var/lib/containerd" + oldSuffix,
 		filepath.Join(target, "docker"), filepath.Join(target, "containerd"),
 	} {
-		if exists(m, p) {
+		if there(m, p) {
 			t.Errorf("%s is left", p)
 		}
 	}
-	if !exists(m, target) {
+	if !there(m, target) {
 		t.Errorf("the target folder itself went away")
 	}
 	if m.location() != "" {
@@ -304,10 +336,10 @@ func TestMoveBackFails(t *testing.T) {
 				t.Errorf("the unit changed:\n%s", b)
 			}
 			for _, a := range areas {
-				if exists(m, a.live+newSuffix) {
+				if there(m, a.live+newSuffix) {
 					t.Errorf("%s is left", a.live+newSuffix)
 				}
-				if !exists(m, a.live) {
+				if !there(m, a.live) {
 					t.Errorf("%s, the mount point, is gone", a.live)
 				}
 			}

@@ -5,9 +5,14 @@
 // folder's docker and containerd folders, systemd mount units that the two
 // services require. Neither service's configuration is touched.
 //
-// A move stops Docker, copies, switches the mounts, starts Docker again and
-// checks that what ran before runs again; anything wrong puts everything back
-// as it was. The old data is kept until the owner deletes it.
+// A move goes from the default place to a folder, or back: never from one
+// folder to another, which would go through the default place anyway. It
+// stops Docker, copies, switches the mounts, checks that the live folders are
+// the new copy, starts Docker again and checks that what ran before runs
+// again; anything wrong puts everything back as it was, and says where the
+// data is when it could not. The old data is kept until the owner deletes it.
+// A move cut short by a stop of this service is finished or undone at its
+// next start (Recover).
 package dockerlocation
 
 import (
@@ -25,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -83,6 +89,11 @@ type State struct {
 	OldCopy     []string   `json:"old_copy,omitempty"` // what the last move left behind, to delete
 	StartedAt   *time.Time `json:"started_at,omitempty"`
 	FinishedAt  *time.Time `json:"finished_at,omitempty"`
+
+	// kept for Recover while a move runs: where it went from, and the
+	// containers to start again
+	From    string   `json:"from,omitempty"`
+	Running []string `json:"running,omitempty"`
 }
 
 // Check says whether a folder can take Docker's data.
@@ -110,17 +121,41 @@ type Mover struct {
 	StatFS func(path string) (fsType string, freeBytes int64, err error)
 	// Copy copies a live folder into its new place; tests replace it.
 	Copy func(ctx context.Context, src, dst string) error
+	// SameDir says whether two paths are the same folder (a bind mount shows
+	// its source's device and inode); tests replace it.
+	SameDir func(a, b string) bool
 	// Wait is how long Docker and the containers get to come back after a
 	// switch, Poll how often they are asked; zero: 2 minutes, 2 seconds.
 	Wait, Poll time.Duration
 
+	// moving is held from a Start (its check included) to the end of the
+	// move, by a delete of the old copy and by Recover: one at a time
+	moving sync.Mutex
+
 	mu    sync.Mutex
 	state State
+	// the move a stop of this service cut short, for Recover
+	interrupted State
+
+	// what the areas take, measured at most this often for a check: a walk
+	// of a big overlay tree takes minutes
+	usedMu      sync.Mutex
+	used        usage
+	usedAt      time.Time
+	usedRefresh atomic.Bool
 }
+
+// usage is what the areas hold: on disk (for the room needed) and as file
+// sizes (what rsync counts as it copies).
+type usage struct{ blocks, apparent int64 }
+
+// usageFresh is how long a measure of the areas serves a check.
+const usageFresh = 10 * time.Minute
 
 func New(statePath string) *Mover {
 	m := &Mover{StatePath: statePath, Run: run, StatFS: statFS}
 	m.Copy = m.copyTree
+	m.SameDir = m.sameDir
 	m.load()
 	return m
 }
@@ -140,14 +175,15 @@ func now() *time.Time {
 	return &t
 }
 
-// load reads the state a previous run kept. A move cut short by a stop or a
-// crash is reported failed: the mounts say where the data really is.
+// load reads the state a previous run kept. A move cut short is reported
+// failed until Recover has dealt with it: the mounts say where the data is.
 func (m *Mover) load() {
 	m.state = State{Phase: PhaseIdle}
 	if b, err := os.ReadFile(m.StatePath); err == nil {
 		_ = json.Unmarshal(b, &m.state)
 	}
-	if m.state.Phase != PhaseIdle && m.state.Phase != PhaseDone && m.state.Phase != PhaseFailed {
+	if m.state.busy() {
+		m.interrupted = m.state
 		m.state.Phase = PhaseFailed
 		m.state.Message = "the move was interrupted; check that the apps run"
 	}
@@ -175,12 +211,14 @@ func (m *Mover) State() State {
 	defer m.mu.Unlock()
 	s := m.state
 	s.OldCopy = slices.Clone(s.OldCopy)
+	s.Running = nil
+	s.From = ""
 	return s
 }
 
 // busy reports whether a move is under way.
 func (s State) busy() bool {
-	return s.Phase != PhaseIdle && s.Phase != PhaseDone && s.Phase != PhaseFailed
+	return s.Phase != PhaseIdle && s.Phase != PhaseDone && s.Phase != PhaseFailed && s.Phase != ""
 }
 
 // location is the folder the docker mount unit points into; empty when
@@ -248,16 +286,29 @@ var goodFS = map[int64]string{
 	0x9123683e: "btrfs",
 }
 
-// CheckTarget says whether path can take the data now in its place.
+// dockerMounts are what Docker and containerd mount in their folders: the
+// file systems of containers, their /dev/shm, their network namespaces. A
+// move unmounts these once Docker is stopped; anything else mounted there is
+// somebody's disk, and refuses the move.
+var dockerMounts = []string{"overlay", "tmpfs", "nsfs", "shm"}
+
+// CheckTarget says whether path can take the data now in its place. It asks
+// Docker where its data is, and measures it at most every usageFresh: the
+// move measures again before it stops anything.
 func (m *Mover) CheckTarget(ctx context.Context, path string) Check {
 	c := Check{Path: filepath.Clean(path), Location: m.State().Location}
-	c.UsedBytes = m.usedBytes()
-	c.NeedBytes = c.UsedBytes + c.UsedBytes/10 + 64<<20
+	u := m.estimate()
+	c.UsedBytes = u.blocks
+	c.NeedBytes = need(u.blocks)
 	if out, err := m.Run(ctx, "docker", "ps", "-aq"); err == nil {
 		c.Containers = len(strings.Fields(out))
 	}
 
 	fail := func(reason string) Check { c.Reason = reason; return c }
+
+	if reason := m.dockerRootProblem(ctx); reason != "" {
+		return fail(reason)
+	}
 
 	if path == Default {
 		c.Path = DefaultDir
@@ -270,7 +321,7 @@ func (m *Mover) CheckTarget(ctx context.Context, path string) Check {
 		}
 		c.FSType, c.FreeBytes = fsType, free
 		for _, a := range areas {
-			if _, err := os.Stat(m.path(a.live + newSuffix)); err == nil {
+			if _, err := os.Lstat(m.path(a.live + newSuffix)); err == nil {
 				return fail(a.live + newSuffix + " is there: a move back did not finish")
 			}
 		}
@@ -281,9 +332,24 @@ func (m *Mover) CheckTarget(ctx context.Context, path string) Check {
 		return c
 	}
 
+	// from a folder, only back: another folder is reached through the default place
+	if c.Location != "" {
+		return fail(fmt.Sprintf("Docker's data is in %s: move it back to the default place first", c.Location))
+	}
+
 	if !filepath.IsAbs(path) || !safePath.MatchString(c.Path) {
 		return fail("give a folder path of letters, digits and . _ - + @ only")
 	}
+
+	// a link under /DATA may point anywhere: the folder it names is checked
+	resolved, err := filepath.EvalSymlinks(m.path(c.Path))
+	if err != nil {
+		return fail("the folder does not exist")
+	}
+	if c.Path, err = m.unroot(resolved); err != nil {
+		return fail(err.Error())
+	}
+
 	under := false
 	for _, root := range Roots {
 		if c.Path == root || strings.HasPrefix(c.Path, root+"/") {
@@ -292,9 +358,6 @@ func (m *Mover) CheckTarget(ctx context.Context, path string) Check {
 	}
 	if !under {
 		return fail("Docker's data can go under " + strings.Join(Roots, " or "))
-	}
-	if c.Path == c.Location {
-		return fail("Docker's data is there already")
 	}
 
 	st, err := os.Stat(m.path(c.Path))
@@ -321,6 +384,17 @@ func (m *Mover) CheckTarget(ctx context.Context, path string) Check {
 		if !emptyOrMissing(m.path(filepath.Join(c.Path, a.name))) {
 			return fail(fmt.Sprintf("%s is not empty", filepath.Join(c.Path, a.name)))
 		}
+		// the live folder is renamed to this: one left by an earlier move would stop the switch after the whole copy
+		if _, err := os.Lstat(m.path(a.live + oldSuffix)); err == nil {
+			return fail(fmt.Sprintf("%s, the old copy of an earlier move, is still there: delete it first", a.live+oldSuffix))
+		}
+		// the live folder is renamed aside: a mount point cannot be
+		if slices.ContainsFunc(m.mounts(), func(e mountEntry) bool { return e.point == a.live }) {
+			return fail(fmt.Sprintf("%s is a mount point of its own: it cannot be moved this way", a.live))
+		}
+		if foreign := m.foreignMountsUnder(a.live); len(foreign) > 0 {
+			return fail(fmt.Sprintf("a drive is mounted in %s (%s): its data would not be moved", a.live, strings.Join(foreign, ", ")))
+		}
 	}
 	if c.FreeBytes < c.NeedBytes {
 		return fail(fmt.Sprintf("the drive has %d MB free, the move needs %d MB", c.FreeBytes>>20, c.NeedBytes>>20))
@@ -328,6 +402,39 @@ func (m *Mover) CheckTarget(ctx context.Context, path string) Check {
 
 	c.OK = true
 	return c
+}
+
+// need is the room a copy of used bytes needs: a tenth more, and 64 MB.
+func need(used int64) int64 { return used + used/10 + 64<<20 }
+
+// unroot turns a path on the host (under Root) back into the host's view.
+func (m *Mover) unroot(p string) (string, error) {
+	if m.Root == "" {
+		return filepath.Clean(p), nil
+	}
+	root, err := filepath.EvalSymlinks(m.Root)
+	if err != nil {
+		root = m.Root
+	}
+	rel, err := filepath.Rel(root, p)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return "", errors.New("the folder is outside this machine's folders")
+	}
+	return filepath.Join("/", rel), nil
+}
+
+// dockerRootProblem says why Docker's data cannot be moved from here, or "":
+// Docker must answer, and keep its data in /var/lib/docker. A data-root set
+// in daemon.json would leave this move copying an old or empty folder.
+func (m *Mover) dockerRootProblem(ctx context.Context) string {
+	out, err := m.Run(ctx, "docker", "info", "--format", "{{.DockerRootDir}}")
+	if err != nil || strings.TrimSpace(out) == "" {
+		return "Docker does not answer: it must run for its data to be moved"
+	}
+	if root := strings.TrimSpace(out); root != DefaultDir {
+		return fmt.Sprintf("Docker keeps its data in %s (data-root in /etc/docker/daemon.json): this move only knows %s", root, DefaultDir)
+	}
+	return ""
 }
 
 func statFS(path string) (string, int64, error) {
@@ -342,30 +449,33 @@ func statFS(path string) (string, int64, error) {
 	return name, int64(fs.Bavail) * int64(fs.Bsize), nil
 }
 
-// mountPoint is the mount point of the file system holding path: the
-// highest folder on the same device.
-func (m *Mover) mountPoint(path string) string {
-	dev := func(p string) (uint64, bool) {
-		st, err := os.Stat(m.path(p))
-		if err != nil {
-			return 0, false
-		}
-		s, ok := st.Sys().(*syscall.Stat_t)
-		return uint64(s.Dev), ok
+// sameDir reports whether a and b are the same folder: a bind mount shows its
+// source's device and inode.
+func (m *Mover) sameDir(a, b string) bool {
+	sa, err := os.Stat(m.path(a))
+	if err != nil {
+		return false
 	}
+	sb, err := os.Stat(m.path(b))
+	if err != nil {
+		return false
+	}
+	x, ok1 := sa.Sys().(*syscall.Stat_t)
+	y, ok2 := sb.Sys().(*syscall.Stat_t)
+	return ok1 && ok2 && x.Dev == y.Dev && x.Ino == y.Ino
+}
 
-	here, ok := dev(path)
-	if !ok {
-		return "/"
-	}
-	for path != "/" {
-		parent := filepath.Dir(path)
-		if d, ok := dev(parent); !ok || d != here {
-			return path
+// mountPoint is the mount point of the file system holding path, from the
+// mount table: a btrfs subvolume has a device of its own without being a
+// mount, so the devices of folders cannot say it.
+func (m *Mover) mountPoint(path string) string {
+	best := "/"
+	for _, e := range m.mounts() {
+		if (path == e.point || strings.HasPrefix(path, strings.TrimSuffix(e.point, "/")+"/")) && len(e.point) > len(best) {
+			best = e.point
 		}
-		path = parent
 	}
-	return "/"
+	return best
 }
 
 // inFstab reports whether /etc/fstab mounts something at mp.
@@ -389,10 +499,29 @@ func emptyOrMissing(dir string) bool {
 	return errors.Is(err, os.ErrNotExist) || (err == nil && len(entries) == 0)
 }
 
-// usedBytes is what the areas take on disk, not crossing into other file
-// systems (the overlay mounts of running containers).
-func (m *Mover) usedBytes() int64 {
-	var total int64
+// estimate is what the areas take, as measured at most usageFresh ago; an
+// older measure serves while a new one is taken in the background.
+func (m *Mover) estimate() usage {
+	m.usedMu.Lock()
+	u, at := m.used, m.usedAt
+	m.usedMu.Unlock()
+
+	if at.IsZero() {
+		return m.measure()
+	}
+	if time.Since(at) > usageFresh && m.usedRefresh.CompareAndSwap(false, true) {
+		go func() {
+			defer m.usedRefresh.Store(false)
+			m.measure()
+		}()
+	}
+	return u
+}
+
+// measure walks the areas, not crossing into other file systems (the
+// overlay mounts of running containers), and keeps the result.
+func (m *Mover) measure() usage {
+	var u usage
 	for _, a := range areas {
 		root := m.path(a.live)
 		var dev uint64
@@ -412,24 +541,38 @@ func (m *Mover) usedBytes() int64 {
 			if info.IsDir() && uint64(s.Dev) != dev {
 				return filepath.SkipDir
 			}
-			total += int64(s.Blocks) * 512
+			u.blocks += int64(s.Blocks) * 512
+			if info.Mode().IsRegular() {
+				u.apparent += info.Size()
+			}
 			return nil
 		})
 	}
-	return total
+
+	m.usedMu.Lock()
+	m.used, m.usedAt = u, time.Now()
+	m.usedMu.Unlock()
+	return u
 }
 
-// Start begins a move to target in the background, after checking it.
+// errBusy is the answer while a move, a delete or a recovery runs.
+var errBusy = errors.New("a move is under way")
+
+// Start begins a move to target in the background, after checking it. From
+// the check to the end of the move nothing else can start: a second click
+// while a slow check runs is refused, not a second move into the same folder.
 func (m *Mover) Start(target string) (State, error) {
-	m.mu.Lock()
-	if m.state.busy() {
-		m.mu.Unlock()
-		return m.State(), errors.New("a move is under way")
+	if !m.moving.TryLock() {
+		return m.State(), errBusy
 	}
-	m.mu.Unlock()
+	if m.State().busy() {
+		m.moving.Unlock()
+		return m.State(), errBusy
+	}
 
 	c := m.CheckTarget(context.Background(), target)
 	if !c.OK {
+		m.moving.Unlock()
 		return m.State(), errors.New(c.Reason)
 	}
 
@@ -440,15 +583,27 @@ func (m *Mover) Start(target string) (State, error) {
 	}
 
 	m.set(func(s *State) {
-		*s = State{Phase: PhaseStopping, Location: s.Location, Target: to, TotalBytes: c.UsedBytes, OldCopy: s.OldCopy, StartedAt: now()}
+		*s = State{Phase: PhaseStopping, Location: s.Location, From: s.Location, Target: to, TotalBytes: c.UsedBytes, OldCopy: s.OldCopy, StartedAt: now()}
 	})
 
-	go m.move(to)
+	go func() {
+		defer m.moving.Unlock()
+		m.move(to)
+	}()
 
 	return m.State(), nil
 }
 
-// move does the work; every step it cannot finish is undone.
+// dst is where the copy of a goes for a move to target.
+func dst(a area, target string) string {
+	if target == Default {
+		return a.live + newSuffix
+	}
+	return filepath.Join(target, a.name)
+}
+
+// move does the work; every step it cannot finish is undone, and what could
+// not be undone is said with where the data is.
 func (m *Mover) move(target string) {
 	ctx := context.Background()
 	from := m.State().Location
@@ -456,19 +611,44 @@ func (m *Mover) move(target string) {
 	fail := func(err error) {
 		m.set(func(s *State) {
 			s.Phase, s.Message, s.FinishedAt = PhaseFailed, err.Error(), now()
-			s.Location = m.location()
+			s.Location, s.From, s.Running = m.location(), "", nil
 		})
+	}
+
+	// measured now, before anything stops: the check may have used an older measure
+	u := m.measure()
+	room := m.path("/var/lib")
+	if target != Default {
+		room = m.path(target)
+	}
+	if _, free, err := m.StatFS(room); err != nil || free < need(u.blocks) {
+		fail(fmt.Errorf("the drive has %d MB free, the move needs %d MB", free>>20, need(u.blocks)>>20))
+		return
 	}
 
 	// what runs now, to run again after
 	running := m.runningContainers(ctx)
 	images := m.imageCount(ctx)
+	m.set(func(s *State) { s.TotalBytes, s.Running = u.apparent, running })
 
 	// Docker back where it was, with the containers that ran: a container
 	// without a restart policy does not come back with Docker alone
 	restart := func() {
 		m.startServices(ctx)
 		m.startContainers(ctx, running)
+	}
+
+	// undo puts the switch back; when it cannot, the copy stays and the
+	// message says where the data is
+	undoOrSay := func(undo func() error, copied []string, err error) error {
+		if undoErr := undo(); undoErr != nil {
+			restart()
+			return fmt.Errorf("%w; putting it back failed too (%v), so nothing was deleted: the data Docker had is in %s, the copy in %s",
+				err, undoErr, strings.Join(m.dataNow(from), ", "), strings.Join(copied, ", "))
+		}
+		m.removeAll(copied)
+		restart()
+		return err
 	}
 
 	if err := m.stopServices(ctx); err != nil {
@@ -493,12 +673,9 @@ func (m *Mover) move(target string) {
 		if _, err := os.Stat(m.path(a.live)); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		dst := filepath.Join(target, a.name)
-		if target == Default {
-			dst = a.live + newSuffix
-		}
-		copied = append(copied, dst)
-		if err := m.copy(ctx, a.live, dst); err != nil {
+		d := dst(a, target)
+		copied = append(copied, d)
+		if err := m.copy(ctx, a.live, d); err != nil {
 			m.removeAll(copied)
 			restart()
 			fail(fmt.Errorf("copy %s: %w", a.live, err))
@@ -512,35 +689,108 @@ func (m *Mover) move(target string) {
 		switchTo = m.switchToDefault
 	}
 	undo, err := switchTo(ctx, from, target)
+	if err == nil {
+		err = m.checkSwitched(from, target)
+	}
 	if err != nil {
-		undo()
-		m.removeAll(copied)
-		restart()
-		fail(fmt.Errorf("switch to %s: %w", target, err))
+		fail(undoOrSay(undo, copied, fmt.Errorf("switch to %s: %w", place(target), err)))
 		return
 	}
 
 	m.set(func(s *State) { s.Phase = PhaseStarting })
-	if err := m.startAndVerify(ctx, target, running, images); err != nil {
+	if err := m.startAndVerify(ctx, running, images); err != nil {
 		_ = m.stopServices(ctx)
-		undo()
-		m.removeAll(copied)
-		restart()
-		fail(fmt.Errorf("Docker did not come back in %s, so everything is as it was: %w", target, err))
+		fail(undoOrSay(undo, copied, fmt.Errorf("Docker did not come back in %s, so everything is as it was: %w", place(target), err)))
 		return
 	}
 
+	m.finish(from, target)
+}
+
+// finish records a move that ended well.
+func (m *Mover) finish(from, target string) {
 	old := m.oldCopy(from)
 	m.set(func(s *State) {
 		s.Phase, s.Message, s.FinishedAt = PhaseDone, "", now()
-		// what earlier moves left stays listed until it is deleted
+		// what earlier moves left stays listed until it is deleted, but never
+		// what is live again: a folder moved back to is not an old copy
 		for _, p := range old {
 			if !slices.Contains(s.OldCopy, p) {
 				s.OldCopy = append(s.OldCopy, p)
 			}
 		}
-		s.Location, s.Target = target, ""
+		s.Location, s.Target, s.From, s.Running = target, "", "", nil
+		s.OldCopy = slices.DeleteFunc(s.OldCopy, func(p string) bool { return m.inUse(p, target) })
 	})
+}
+
+func place(target string) string {
+	if target == Default {
+		return DefaultDir
+	}
+	return target
+}
+
+// dataNow says where the data Docker had before the move is, for a message.
+func (m *Mover) dataNow(from string) []string {
+	var out []string
+	for _, a := range areas {
+		switch {
+		case from != "":
+			out = append(out, filepath.Join(from, a.name))
+		case exists(m.path(a.live + oldSuffix)):
+			out = append(out, a.live+oldSuffix)
+		default:
+			out = append(out, a.live)
+		}
+	}
+	return out
+}
+
+func exists(p string) bool {
+	_, err := os.Lstat(p)
+	return err == nil
+}
+
+// checkSwitched looks at what the live folders are once switched: the new
+// copy for a move to a folder, no mount at all for the way back. A mount
+// that refused to stop (a shell in /var/lib/docker, a backup reading it)
+// leaves Docker on the old data, whose delete would then delete live data.
+func (m *Mover) checkSwitched(from, target string) error {
+	for _, a := range areas {
+		if target != Default {
+			src := filepath.Join(target, a.name)
+			if !exists(m.path(src)) {
+				continue
+			}
+			if !m.SameDir(a.live, src) {
+				return fmt.Errorf("%s is not %s once switched: something holds the old folder", a.live, src)
+			}
+			continue
+		}
+		if mps := m.mountsUnder(a.live, true); slices.Contains(mps, a.live) {
+			return fmt.Errorf("%s is still mounted", a.live)
+		}
+		if from != "" && m.SameDir(a.live, filepath.Join(from, a.name)) {
+			return fmt.Errorf("%s is still %s", a.live, filepath.Join(from, a.name))
+		}
+	}
+	return nil
+}
+
+// inUse says whether p is what Docker uses with its data in location: a live
+// folder, the location or under it, or a folder a live one is bound to.
+func (m *Mover) inUse(p, location string) bool {
+	p = filepath.Clean(p)
+	for _, a := range areas {
+		if p == a.live || strings.HasPrefix(a.live, p+"/") || m.SameDir(a.live, p) {
+			return true
+		}
+	}
+	if location != "" && (p == location || strings.HasPrefix(p, location+"/") || strings.HasPrefix(location, p+"/")) {
+		return true
+	}
+	return false
 }
 
 func (m *Mover) stopServices(ctx context.Context) error {
@@ -619,20 +869,32 @@ func ParseProgress(line string) int64 {
 	return n
 }
 
-// switchMounts points the live folders at target and returns how to undo
-// it. From the default place the old folders are renamed aside; from another
-// folder the units are rewritten, and the old folder stays as it was.
-func (m *Mover) switchMounts(ctx context.Context, from, target string) (func(), error) {
-	var undos []func()
-	undo := func() {
-		for i := len(undos) - 1; i >= 0; i-- {
-			undos[i]()
+// undoAll runs undos newest first, all of them, and says what failed.
+func undoAll(undos []func() error) error {
+	var errs []error
+	for i := len(undos) - 1; i >= 0; i-- {
+		if err := undos[i](); err != nil {
+			errs = append(errs, err)
 		}
-		_, _ = m.Run(ctx, "systemctl", "daemon-reload")
+	}
+	return errors.Join(errs...)
+}
+
+// switchMounts points the live folders, in their default place, at target
+// and returns how to undo it: the old folders are renamed aside, and the
+// mount units bind target's copies on them.
+func (m *Mover) switchMounts(ctx context.Context, from, target string) (func() error, error) {
+	var undos []func() error
+	undo := func() error { return undoAll(undos) }
+
+	if from != "" {
+		return undo, errors.New("a move goes from the default place: move the data back first")
 	}
 
+	stuckOf := map[string]*bool{}
+
 	for _, a := range areas {
-		if _, err := os.Stat(m.path(filepath.Join(target, a.name))); errors.Is(err, os.ErrNotExist) {
+		if !exists(m.path(filepath.Join(target, a.name))) {
 			continue
 		}
 
@@ -641,26 +903,37 @@ func (m *Mover) switchMounts(ctx context.Context, from, target string) (func(), 
 		prevUnit, _ := os.ReadFile(unitFile)
 		prevDrop, _ := os.ReadFile(dropIn)
 
-		if from != "" {
-			_, _ = m.Run(ctx, "systemctl", "stop", a.unit)
-			undos = append(undos, func() { _, _ = m.Run(ctx, "systemctl", "start", a.unit) })
-		} else {
-			live, aside := m.path(a.live), m.path(a.live+oldSuffix)
-			if err := os.Rename(live, aside); err != nil {
-				return undo, err
+		// set when the mount would not stop: the folder and its unit stay as they are
+		stuck := new(bool)
+		stuckOf[a.unit] = stuck
+
+		live, aside := m.path(a.live), m.path(a.live+oldSuffix)
+		if err := os.Rename(live, aside); err != nil {
+			return undo, err
+		}
+		undos = append(undos, func() error {
+			if *stuck {
+				return fmt.Errorf("%s stays mounted, so the data stays in %s", a.live, a.live+oldSuffix)
 			}
-			undos = append(undos, func() {
-				_ = os.Remove(live)
-				_ = os.Rename(aside, live)
-			})
-			if err := os.Mkdir(live, 0o711); err != nil {
-				return undo, err
+			if err := os.Remove(live); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("%s is not empty, so %s stays as it is: %w", a.live, a.live+oldSuffix, err)
 			}
+			return os.Rename(aside, live)
+		})
+		if err := os.Mkdir(live, 0o711); err != nil {
+			return undo, err
 		}
 
-		undos = append(undos, func() {
-			restore(unitFile, prevUnit)
-			restore(dropIn, prevDrop)
+		// the units go, and systemd forgets them, before the folder comes back
+		undos = append(undos, func() error {
+			if *stuck {
+				return nil
+			}
+			err := errors.Join(restore(unitFile, prevUnit), restore(dropIn, prevDrop))
+			if _, rerr := m.Run(ctx, "systemctl", "daemon-reload"); rerr != nil {
+				err = errors.Join(err, rerr)
+			}
+			return err
 		})
 		if err := os.MkdirAll(filepath.Dir(dropIn), 0o755); err != nil {
 			return undo, err
@@ -678,35 +951,43 @@ func (m *Mover) switchMounts(ctx context.Context, from, target string) (func(), 
 	}
 
 	for _, a := range areas {
-		if _, err := os.Stat(m.path(filepath.Join(target, a.name))); errors.Is(err, os.ErrNotExist) {
+		if !exists(m.path(filepath.Join(target, a.name))) {
 			continue
 		}
+		stuck := stuckOf[a.unit]
 		if _, err := m.Run(ctx, "systemctl", "enable", "--now", a.unit); err != nil {
+			// it may have mounted before failing
+			undos = append(undos, m.unmountUndo(ctx, a, stuck))
 			return undo, err
 		}
-		undos = append(undos, func() {
-			_, _ = m.Run(ctx, "systemctl", "stop", a.unit)
-			if from == "" {
-				_, _ = m.Run(ctx, "systemctl", "disable", a.unit)
-			}
-		})
+		undos = append(undos, m.unmountUndo(ctx, a, stuck))
 	}
 
 	return undo, nil
 }
 
+// unmountUndo stops and disables a mount unit; a stop that fails (the
+// folder is busy) is an error, and marks the area stuck: the folder cannot
+// come back over the mount, nor the unit go from under it.
+func (m *Mover) unmountUndo(ctx context.Context, a area, stuck *bool) func() error {
+	return func() error {
+		if _, err := m.Run(ctx, "systemctl", "stop", a.unit); err != nil {
+			*stuck = true
+			return fmt.Errorf("unmount %s: %w", a.live, err)
+		}
+		_, _ = m.Run(ctx, "systemctl", "disable", a.unit)
+		return nil
+	}
+}
+
 // switchToDefault takes the mounts away and puts the copy made next to the
 // live folders in their place; from's folders become the old copy.
-func (m *Mover) switchToDefault(ctx context.Context, from, _ string) (func(), error) {
-	var undos []func()
-	undo := func() {
-		for i := len(undos) - 1; i >= 0; i-- {
-			undos[i]()
-		}
-	}
+func (m *Mover) switchToDefault(ctx context.Context, from, _ string) (func() error, error) {
+	var undos []func() error
+	undo := func() error { return undoAll(undos) }
 
 	for _, a := range areas {
-		if _, err := os.Stat(m.path(a.live + newSuffix)); err != nil {
+		if !exists(m.path(a.live + newSuffix)) {
 			continue
 		}
 
@@ -715,20 +996,31 @@ func (m *Mover) switchToDefault(ctx context.Context, from, _ string) (func(), er
 		prevUnit, _ := os.ReadFile(unitFile)
 		prevDrop, _ := os.ReadFile(dropIn)
 
+		// a mount that does not stop (the folder is busy) stops the switch:
+		// the copy would go under a folder Docker never sees
 		if _, err := m.Run(ctx, "systemctl", "stop", a.unit); err != nil {
-			return undo, err
+			return undo, fmt.Errorf("unmount %s: %w", a.live, err)
 		}
-		undos = append(undos, func() { _, _ = m.Run(ctx, "systemctl", "start", a.unit) })
+		undos = append(undos, func() error {
+			_, err := m.Run(ctx, "systemctl", "start", a.unit)
+			return err
+		})
 
 		_, _ = m.Run(ctx, "systemctl", "disable", a.unit)
-		undos = append(undos, func() { _, _ = m.Run(ctx, "systemctl", "enable", a.unit) })
+		undos = append(undos, func() error {
+			_, err := m.Run(ctx, "systemctl", "enable", a.unit)
+			return err
+		})
 
 		_ = os.Remove(unitFile)
 		_ = os.Remove(dropIn)
-		undos = append(undos, func() {
-			restore(unitFile, prevUnit)
-			restore(dropIn, prevDrop)
-			_, _ = m.Run(ctx, "systemctl", "daemon-reload")
+		// restored, and reloaded, before the enable and the start above run again
+		undos = append(undos, func() error {
+			err := errors.Join(restore(unitFile, prevUnit), restore(dropIn, prevDrop))
+			if _, rerr := m.Run(ctx, "systemctl", "daemon-reload"); rerr != nil {
+				err = errors.Join(err, rerr)
+			}
+			return err
 		})
 
 		// the live folder is the empty mount point now
@@ -740,9 +1032,11 @@ func (m *Mover) switchToDefault(ctx context.Context, from, _ string) (func(), er
 			_ = os.Mkdir(live, 0o711)
 			return undo, err
 		}
-		undos = append(undos, func() {
-			_ = os.Rename(live, fresh)
-			_ = os.Mkdir(live, 0o711)
+		undos = append(undos, func() error {
+			if err := os.Rename(live, fresh); err != nil {
+				return err
+			}
+			return os.Mkdir(live, 0o711)
 		})
 	}
 
@@ -753,15 +1047,17 @@ func (m *Mover) switchToDefault(ctx context.Context, from, _ string) (func(), er
 }
 
 // restore puts back a file as it was; nil content: it did not exist.
-func restore(path string, content []byte) {
+func restore(path string, content []byte) error {
 	if content == nil {
-		_ = os.Remove(path)
-		return
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
 	}
-	_ = os.WriteFile(path, content, 0o644)
+	return os.WriteFile(path, content, 0o644)
 }
 
-func (m *Mover) startAndVerify(ctx context.Context, target string, running []string, images int) error {
+func (m *Mover) startAndVerify(ctx context.Context, running []string, images int) error {
 	m.startServices(ctx)
 
 	wait, poll := m.Wait, m.Poll
@@ -845,7 +1141,7 @@ func (m *Mover) oldCopy(from string) []string {
 		if from != "" {
 			p = filepath.Join(from, a.name)
 		}
-		if _, err := os.Stat(m.path(p)); err == nil {
+		if exists(m.path(p)) {
 			old = append(old, p)
 		}
 	}
@@ -858,47 +1154,93 @@ func (m *Mover) removeAll(paths []string) {
 	}
 }
 
-// mountsUnder lists the mount points under dir, dir itself when self is
-// set, deepest first, from /proc/self/mountinfo.
-func (m *Mover) mountsUnder(dir string, self bool) []string {
+// mountEntry is a line of the mount table.
+type mountEntry struct{ point, fstype string }
+
+// mounts reads /proc/self/mountinfo.
+func (m *Mover) mounts() []mountEntry {
 	b, err := os.ReadFile(m.path("/proc/self/mountinfo"))
 	if err != nil {
 		return nil
 	}
 
-	var out []string
+	var out []mountEntry
 	sc := bufio.NewScanner(strings.NewReader(string(b)))
 	for sc.Scan() {
-		f := strings.Fields(sc.Text())
+		line := sc.Text()
+		f := strings.Fields(line)
 		if len(f) < 5 {
 			continue
 		}
-		mp := strings.ReplaceAll(f[4], `\040`, " ")
-		if (self && mp == dir) || strings.HasPrefix(mp, dir+"/") {
-			out = append(out, mp)
+		e := mountEntry{point: strings.ReplaceAll(f[4], `\040`, " ")}
+		// the file system type follows the " - " separator
+		if _, rest, ok := strings.Cut(line, " - "); ok {
+			if t := strings.Fields(rest); len(t) > 0 {
+				e.fstype = t[0]
+			}
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// mountsUnder lists the mount points under dir, dir itself when self is
+// set, deepest first.
+func (m *Mover) mountsUnder(dir string, self bool) []string {
+	var out []string
+	for _, e := range m.mounts() {
+		if (self && e.point == dir) || strings.HasPrefix(e.point, dir+"/") {
+			out = append(out, e.point)
 		}
 	}
-
 	slices.SortFunc(out, func(a, b string) int { return len(b) - len(a) })
 	return out
 }
 
-// unmountUnder unmounts every mount under dir, deepest first.
+// foreignMountsUnder lists what is mounted under dir that Docker did not
+// mount: a drive of somebody's.
+func (m *Mover) foreignMountsUnder(dir string) []string {
+	var out []string
+	for _, e := range m.mounts() {
+		if strings.HasPrefix(e.point, dir+"/") && !slices.Contains(dockerMounts, e.fstype) {
+			out = append(out, e.point)
+		}
+	}
+	return out
+}
+
+// unmountUnder unmounts what Docker and containerd mounted under dir (dir
+// itself when self is set), deepest first. Anything else stays mounted: it
+// is not the move's, and a delete that would cross into it refuses.
 func (m *Mover) unmountUnder(ctx context.Context, dir string, self bool) error {
-	for _, mp := range m.mountsUnder(dir, self) {
+	var mine []string
+	for _, e := range m.mounts() {
+		if ((self && e.point == dir) || strings.HasPrefix(e.point, dir+"/")) && slices.Contains(dockerMounts, e.fstype) {
+			mine = append(mine, e.point)
+		}
+	}
+	slices.SortFunc(mine, func(a, b string) int { return len(b) - len(a) })
+
+	for _, mp := range mine {
 		if _, err := m.Run(ctx, "umount", mp); err != nil {
 			return err
 		}
 	}
-	if left := m.mountsUnder(dir, self); len(left) > 0 {
+	var left []string
+	for _, e := range m.mounts() {
+		if slices.Contains(mine, e.point) {
+			left = append(left, e.point)
+		}
+	}
+	if len(left) > 0 {
 		return fmt.Errorf("still mounted: %s", strings.Join(left, ", "))
 	}
 	return nil
 }
 
-// removeTree deletes a folder a move made or left, first unmounting what is
-// mounted in it, and never crossing into another file system: what is
-// mounted there is not the move's to delete.
+// removeTree deletes a folder a move made or left, first unmounting what
+// Docker left mounted in it, and never crossing into another file system:
+// what is mounted there is not the move's to delete.
 func (m *Mover) removeTree(ctx context.Context, p string) error {
 	if err := m.unmountUnder(ctx, p, true); err != nil {
 		return err
@@ -928,18 +1270,23 @@ func (m *Mover) removeTree(ctx context.Context, p string) error {
 	return os.RemoveAll(root)
 }
 
-// DeleteOldCopy deletes what the last move left behind.
+// DeleteOldCopy deletes what the last move left behind. Each folder is
+// looked at first: never one Docker uses, whatever the list says.
 func (m *Mover) DeleteOldCopy() (State, error) {
+	if !m.moving.TryLock() {
+		return m.State(), errBusy
+	}
+	defer m.moving.Unlock()
+
 	s := m.State()
 	if s.busy() {
-		return s, errors.New("a move is under way")
+		return s, errBusy
 	}
 	if len(s.OldCopy) == 0 {
 		return s, errors.New("there is no old copy")
 	}
 	for _, p := range s.OldCopy {
-		// only what a move left: never the live folders or the location
-		if p == "/var/lib/docker" || p == "/var/lib/containerd" || strings.HasPrefix(s.Location+"/", p+"/") {
+		if m.inUse(p, s.Location) {
 			return s, fmt.Errorf("%s is in use", p)
 		}
 	}
@@ -956,4 +1303,159 @@ func (m *Mover) DeleteOldCopy() (State, error) {
 		return m.State(), fmt.Errorf("not all was deleted: %s", strings.Join(errs, "; "))
 	}
 	return m.State(), nil
+}
+
+// Recover deals with a move a stop of this service cut short (an update, a
+// crash, the machine turned off), at the next start:
+//   - stopped or copying: nothing was switched; the partial copy goes and
+//     Docker starts again with the containers that ran;
+//   - switching: the switch is put back to where the data was, which the move
+//     never touched;
+//   - starting: the switch was done; Docker and the containers are started.
+//
+// Docker is never left stopped by an interrupted move.
+func (m *Mover) Recover(ctx context.Context) {
+	m.moving.Lock()
+	defer m.moving.Unlock()
+
+	m.mu.Lock()
+	cut := m.interrupted
+	m.interrupted = State{}
+	m.mu.Unlock()
+	if !cut.busy() {
+		return
+	}
+
+	from, target := cut.From, cut.Target
+	var why string
+	var err error
+
+	switch cut.Phase {
+	case PhaseStopping, PhaseCopying:
+		err = m.dropCopies(ctx, from, target)
+		why = "while Docker was stopped for the copy; the partial copy was deleted and nothing else changed"
+	case PhaseSwitching:
+		if from == "" {
+			err = m.backToDefault(ctx, target)
+		} else {
+			err = m.backToFolder(ctx, from)
+		}
+		if err == nil {
+			err = m.dropCopies(ctx, from, target)
+		}
+		why = "while switching to the new place; it was put back where the data was"
+	default: // starting
+		why = "while Docker was starting from the new place; it was started there"
+	}
+
+	m.startServices(ctx)
+	m.startContainers(ctx, cut.Running)
+
+	msg := "the move was interrupted " + why + ": check that the apps run"
+	if err != nil {
+		msg = fmt.Sprintf("the move was interrupted %s, and putting it back failed (%v): Docker was started again; check where its data is before anything else", why, err)
+	}
+	if cut.Phase == PhaseStarting {
+		m.finish(from, m.location())
+	}
+	m.set(func(s *State) {
+		if cut.Phase != PhaseStarting {
+			s.Phase = PhaseFailed
+		}
+		s.Message, s.FinishedAt = msg, now()
+		s.Location, s.Target, s.From, s.Running = m.location(), "", "", nil
+	})
+}
+
+// dropCopies deletes the copies an interrupted move made, never a folder
+// Docker uses.
+func (m *Mover) dropCopies(ctx context.Context, from, target string) error {
+	var errs []error
+	for _, a := range areas {
+		d := dst(a, target)
+		if !exists(m.path(d)) || m.inUse(d, m.location()) {
+			continue
+		}
+		if err := m.removeTree(ctx, d); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// backToDefault puts back what a switch from the default place did: the
+// units go, and the folders set aside come back.
+func (m *Mover) backToDefault(ctx context.Context, target string) error {
+	var errs []error
+	for _, a := range areas {
+		// the unit and drop-in of every area go, switched or not yet
+		if exists(m.path(unitPath(a.unit))) {
+			if _, err := m.Run(ctx, "systemctl", "stop", a.unit); err != nil {
+				errs = append(errs, fmt.Errorf("unmount %s: %w", a.live, err))
+				continue
+			}
+			_, _ = m.Run(ctx, "systemctl", "disable", a.unit)
+		}
+		errs = append(errs, restore(m.path(unitPath(a.unit)), nil), restore(m.path(dropInPath(a.service)), nil))
+		if _, err := m.Run(ctx, "systemctl", "daemon-reload"); err != nil {
+			errs = append(errs, err)
+		}
+		if !exists(m.path(a.live + oldSuffix)) {
+			continue
+		}
+		if err := os.Remove(m.path(a.live)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("%s is not empty, so %s stays as it is: %w", a.live, a.live+oldSuffix, err))
+			continue
+		}
+		if err := os.Rename(m.path(a.live+oldSuffix), m.path(a.live)); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// backToFolder puts back a way back cut short: every live folder is bound
+// again to its copy in from, which the way back never changes.
+func (m *Mover) backToFolder(ctx context.Context, from string) error {
+	var errs []error
+	for _, a := range areas {
+		src := filepath.Join(from, a.name)
+		if !exists(m.path(src)) {
+			continue
+		}
+		live := m.path(a.live)
+		// a live folder that was switched holds the new copy: it goes aside, to be deleted
+		if !emptyOrMissing(live) && !m.SameDir(a.live, src) {
+			if err := os.Rename(live, m.path(a.live+newSuffix)); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+		}
+		if err := os.MkdirAll(live, 0o711); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(m.path(dropInPath(a.service))), 0o755); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		errs = append(errs,
+			os.WriteFile(m.path(unitPath(a.unit)), []byte(MountUnit(src, a.live, from, a.service)), 0o644),
+			os.WriteFile(m.path(dropInPath(a.service)), []byte(DropIn(a.live)), 0o644))
+	}
+	if _, err := m.Run(ctx, "systemctl", "daemon-reload"); err != nil {
+		errs = append(errs, err)
+	}
+	for _, a := range areas {
+		if !exists(m.path(filepath.Join(from, a.name))) {
+			continue
+		}
+		if _, err := m.Run(ctx, "systemctl", "enable", "--now", a.unit); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	return m.checkSwitched("", from)
 }
