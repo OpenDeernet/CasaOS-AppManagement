@@ -12,3 +12,4 @@ Type=notify
 
 [Install]
 WantedBy=multi-user.target
+Alias=recasaos-app-management.service
