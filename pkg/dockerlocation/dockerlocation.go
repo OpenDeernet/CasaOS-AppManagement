@@ -190,11 +190,30 @@ func (m *Mover) load() {
 	m.state.Location = m.location()
 }
 
+// save writes the state next to its file and renames it over: a stop
+// halfway leaves the old state or the new one, never an empty file that
+// would hide a move to recover.
 func (m *Mover) save() {
 	b, err := json.MarshalIndent(m.state, "", "  ")
-	if err == nil {
-		_ = os.MkdirAll(filepath.Dir(m.StatePath), 0o755)
-		_ = os.WriteFile(m.StatePath, b, 0o644)
+	if err != nil {
+		return
+	}
+	dir := filepath.Dir(m.StatePath)
+	_ = os.MkdirAll(dir, 0o755)
+	f, err := os.CreateTemp(dir, filepath.Base(m.StatePath)+".*")
+	if err != nil {
+		return
+	}
+	_, werr := f.Write(b)
+	serr := f.Sync()
+	cerr := f.Close()
+	if werr != nil || serr != nil || cerr != nil {
+		_ = os.Remove(f.Name())
+		return
+	}
+	_ = os.Chmod(f.Name(), 0o644)
+	if err := os.Rename(f.Name(), m.StatePath); err != nil {
+		_ = os.Remove(f.Name())
 	}
 }
 
@@ -203,6 +222,21 @@ func (m *Mover) set(f func(s *State)) {
 	defer m.mu.Unlock()
 	f(&m.state)
 	m.save()
+}
+
+// show changes the state the dashboard reads without writing it: how far a
+// copy is matters to nobody after a stop.
+func (m *Mover) show(f func(s *State)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	f(&m.state)
+}
+
+// recovering says whether a move cut short waits for Recover.
+func (m *Mover) recovering() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.interrupted.busy()
 }
 
 // State is a copy of the state now.
@@ -323,6 +357,9 @@ func (m *Mover) CheckTarget(ctx context.Context, path string) Check {
 		for _, a := range areas {
 			if _, err := os.Lstat(m.path(a.live + newSuffix)); err == nil {
 				return fail(a.live + newSuffix + " is there: a move back did not finish")
+			}
+			if foreign := m.foreignMountsUnder(a.live); len(foreign) > 0 {
+				return fail(fmt.Sprintf("a drive is mounted in %s (%s): its data would not be moved", a.live, strings.Join(foreign, ", ")))
 			}
 		}
 		if c.FreeBytes < c.NeedBytes {
@@ -518,6 +555,17 @@ func (m *Mover) estimate() usage {
 	return u
 }
 
+// recentMeasure is a measure at most maxAge old, taken now if there is none.
+func (m *Mover) recentMeasure(maxAge time.Duration) usage {
+	m.usedMu.Lock()
+	u, at := m.used, m.usedAt
+	m.usedMu.Unlock()
+	if !at.IsZero() && time.Since(at) < maxAge {
+		return u
+	}
+	return m.measure()
+}
+
 // measure walks the areas, not crossing into other file systems (the
 // overlay mounts of running containers), and keeps the result.
 func (m *Mover) measure() usage {
@@ -565,7 +613,8 @@ func (m *Mover) Start(target string) (State, error) {
 	if !m.moving.TryLock() {
 		return m.State(), errBusy
 	}
-	if m.State().busy() {
+	// a move cut short is Recover's first: it acts on what it read at start
+	if m.State().busy() || m.recovering() {
 		m.moving.Unlock()
 		return m.State(), errBusy
 	}
@@ -615,8 +664,9 @@ func (m *Mover) move(target string) {
 		})
 	}
 
-	// measured now, before anything stops: the check may have used an older measure
-	u := m.measure()
+	// measured now, before anything stops: the check may have used an older
+	// measure; one taken by the check of this Start serves
+	u := m.recentMeasure(time.Minute)
 	room := m.path("/var/lib")
 	if target != Default {
 		room = m.path(target)
@@ -648,29 +698,26 @@ func (m *Mover) move(target string) {
 		}
 		m.removeAll(copied)
 		restart()
-		return err
-	}
-
-	if err := m.stopServices(ctx); err != nil {
-		restart()
-		fail(fmt.Errorf("stop Docker: %w", err))
-		return
+		return fmt.Errorf("%w; everything was put back as it was", err)
 	}
 
 	// a container's file system can stay mounted once Docker stops: it would
 	// be copied as it looks from above, and pin the old folder
-	for _, a := range areas {
-		if err := m.unmountUnder(ctx, a.live, false); err != nil {
-			restart()
-			fail(fmt.Errorf("unmount what Docker left mounted: %w", err))
-			return
-		}
+	if err := m.quiesce(ctx); err != nil {
+		restart()
+		fail(err)
+		return
 	}
 
 	m.set(func(s *State) { s.Phase = PhaseCopying })
 	var copied []string
 	for _, a := range areas {
 		if _, err := os.Stat(m.path(a.live)); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		// the way back moves what was moved: a /var/lib/containerd made
+		// since, on the system disk, has no mount to take away
+		if target == Default && !exists(m.path(unitPath(a.unit))) {
 			continue
 		}
 		d := dst(a, target)
@@ -699,8 +746,11 @@ func (m *Mover) move(target string) {
 
 	m.set(func(s *State) { s.Phase = PhaseStarting })
 	if err := m.startAndVerify(ctx, running, images); err != nil {
-		_ = m.stopServices(ctx)
-		fail(undoOrSay(undo, copied, fmt.Errorf("Docker did not come back in %s, so everything is as it was: %w", place(target), err)))
+		// switching again: a stop during the undo is put back by Recover,
+		// never taken for a move that ended well
+		m.set(func(s *State) { s.Phase = PhaseSwitching })
+		_ = m.quiesce(ctx)
+		fail(undoOrSay(undo, copied, fmt.Errorf("Docker did not come back in %s: %w", place(target), err)))
 		return
 	}
 
@@ -804,7 +854,11 @@ func (m *Mover) stopServices(ctx context.Context) error {
 }
 
 func (m *Mover) startServices(ctx context.Context) {
-	for _, unit := range []string{"containerd.service", "docker.socket", "docker.service"} {
+	units := []string{"containerd.service", "docker.socket", "docker.service"}
+	// docker.service allows 3 starts a minute: a move, its undo and a retry,
+	// or a boot and Recover, can pass that, and systemd then refuses the start
+	_, _ = m.Run(ctx, "systemctl", append([]string{"reset-failed"}, units...)...)
+	for _, unit := range units {
 		_, _ = m.Run(ctx, "systemctl", "start", unit)
 	}
 }
@@ -826,7 +880,8 @@ func (m *Mover) copyTree(ctx context.Context, src, dst string) error {
 	}
 
 	base := m.State().CopiedBytes
-	cmd := exec.CommandContext(ctx, "rsync", "-aHAXS", "--numeric-ids", "--info=progress2", "--no-inc-recursive",
+	// -x: a file system mounted inside is not the move's, as measure counts it
+	cmd := exec.CommandContext(ctx, "rsync", "-aHAXSx", "--numeric-ids", "--info=progress2", "--no-inc-recursive",
 		m.path(src)+"/", m.path(dst)+"/")
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -844,7 +899,7 @@ func (m *Mover) copyTree(ctx context.Context, src, dst string) error {
 	for {
 		line, err := r.ReadString('\r')
 		if n := ParseProgress(line); n > 0 {
-			m.set(func(s *State) { s.CopiedBytes = base + n })
+			m.show(func(s *State) { s.CopiedBytes = base + n })
 		}
 		if err == io.EOF {
 			break
@@ -1279,7 +1334,7 @@ func (m *Mover) DeleteOldCopy() (State, error) {
 	defer m.moving.Unlock()
 
 	s := m.State()
-	if s.busy() {
+	if s.busy() || m.recovering() {
 		return s, errBusy
 	}
 	if len(s.OldCopy) == 0 {
@@ -1330,22 +1385,38 @@ func (m *Mover) Recover(ctx context.Context) {
 	var why string
 	var err error
 
-	switch cut.Phase {
-	case PhaseStopping, PhaseCopying:
-		err = m.dropCopies(ctx, from, target)
-		why = "while Docker was stopped for the copy; the partial copy was deleted and nothing else changed"
-	case PhaseSwitching:
-		if from == "" {
-			err = m.backToDefault(ctx, target)
-		} else {
-			err = m.backToFolder(ctx, from)
-		}
-		if err == nil {
-			err = m.dropCopies(ctx, from, target)
-		}
-		why = "while switching to the new place; it was put back where the data was"
-	default: // starting
+	// a switch that had ended is kept: at boot Docker has run from the new
+	// place already, and what the apps wrote since is there
+	kept := cut.Phase == PhaseStarting
+	if cut.Phase == PhaseSwitching && m.switchDone(from, target) {
+		kept = true
+		err = m.enableUnits(ctx, target)
+		why = "just after the switch to the new place, which was kept; Docker was started there"
+	} else if cut.Phase == PhaseStarting {
 		why = "while Docker was starting from the new place; it was started there"
+	}
+
+	if !kept {
+		// at boot Docker starts before this service, from whatever the
+		// folders are now: it stops, socket first, and lets go of its mounts
+		// before any folder under it changes; if it cannot, nothing does
+		if qerr := m.quiesce(ctx); qerr != nil {
+			err = qerr
+			why = "and Docker could not be stopped to put it right, so nothing was changed"
+		} else if cut.Phase == PhaseSwitching {
+			if from == "" {
+				err = m.backToDefault(ctx, target)
+			} else {
+				err = m.backToFolder(ctx, from)
+			}
+			if err == nil {
+				err = m.dropCopies(ctx, from, target)
+			}
+			why = "while switching to the new place; it was put back where the data was"
+		} else { // stopping, copying
+			err = m.dropCopies(ctx, from, target)
+			why = "while Docker was stopped for the copy; the partial copy was deleted and nothing else changed"
+		}
 	}
 
 	m.startServices(ctx)
@@ -1353,18 +1424,73 @@ func (m *Mover) Recover(ctx context.Context) {
 
 	msg := "the move was interrupted " + why + ": check that the apps run"
 	if err != nil {
-		msg = fmt.Sprintf("the move was interrupted %s, and putting it back failed (%v): Docker was started again; check where its data is before anything else", why, err)
+		msg = fmt.Sprintf("the move was interrupted %s, and putting it right failed (%v): Docker was started again; check where its data is before anything else", why, err)
 	}
-	if cut.Phase == PhaseStarting {
+	if kept {
 		m.finish(from, m.location())
 	}
 	m.set(func(s *State) {
-		if cut.Phase != PhaseStarting {
+		if !kept {
 			s.Phase = PhaseFailed
 		}
 		s.Message, s.FinishedAt = msg, now()
 		s.Location, s.Target, s.From, s.Running = m.location(), "", "", nil
 	})
+}
+
+// quiesce stops Docker and containerd, the socket first so that nothing
+// wakes them, and unmounts what they left mounted in their folders.
+func (m *Mover) quiesce(ctx context.Context) error {
+	if err := m.stopServices(ctx); err != nil {
+		return fmt.Errorf("stop Docker: %w", err)
+	}
+	for _, a := range areas {
+		if err := m.unmountUnder(ctx, a.live, false); err != nil {
+			return fmt.Errorf("unmount what Docker left mounted: %w", err)
+		}
+	}
+	return nil
+}
+
+// switchDone says whether an interrupted switch had ended: every area is in
+// the new place, its unit written (to a folder) or gone (back), and the live
+// folders are what they should be.
+func (m *Mover) switchDone(from, target string) bool {
+	for _, a := range areas {
+		unit, unitErr := os.ReadFile(m.path(unitPath(a.unit)))
+		if target == Default {
+			if exists(m.path(a.live+newSuffix)) || unitErr == nil {
+				return false
+			}
+			continue
+		}
+		src := filepath.Join(target, a.name)
+		if !exists(m.path(src)) {
+			continue
+		}
+		if unitErr != nil || unitValue(string(unit), "What") != src || !exists(m.path(dropInPath(a.service))) {
+			return false
+		}
+	}
+	return m.checkSwitched(from, target) == nil
+}
+
+// enableUnits makes sure the mount units of a switch to target are enabled
+// and mounted; there are none for the way back.
+func (m *Mover) enableUnits(ctx context.Context, target string) error {
+	if target == Default {
+		return nil
+	}
+	var errs []error
+	for _, a := range areas {
+		if !exists(m.path(filepath.Join(target, a.name))) {
+			continue
+		}
+		if _, err := m.Run(ctx, "systemctl", "enable", "--now", a.unit); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // dropCopies deletes the copies an interrupted move made, never a folder

@@ -29,6 +29,9 @@ type fakeDocker struct {
 	// folder is busy)
 	mounted map[string]bool
 	busy    map[string]bool
+	// services whose stop fails; hook sees every call before it runs
+	stuck map[string]bool
+	hook  func(call string)
 }
 
 func newFakeDocker(m *Mover) *fakeDocker {
@@ -53,7 +56,14 @@ func newFakeDocker(m *Mover) *fakeDocker {
 func (d *fakeDocker) run(_ context.Context, name string, args ...string) (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.calls = append(d.calls, name+" "+strings.Join(args, " "))
+	call := name + " " + strings.Join(args, " ")
+	d.calls = append(d.calls, call)
+	if d.hook != nil {
+		d.hook(call)
+	}
+	if name == "systemctl" && len(args) == 2 && args[0] == "stop" && d.stuck[args[1]] {
+		return "", errors.New("Job for " + args[1] + " canceled")
+	}
 
 	switch {
 	case name == "systemctl" && len(args) == 2 && args[1] == "docker.service":
