@@ -67,8 +67,9 @@ var areas = []area{
 // oldSuffix names the data a move from the default place leaves behind;
 // newSuffix the copy a move back to it makes before it takes the place.
 const (
-	oldSuffix = ".casaos-old"
-	newSuffix = ".casaos-new"
+	oldSuffix  = ".casaos-old"
+	newSuffix  = ".casaos-new"
+	bootSuffix = ".casaos-boot"
 )
 
 // Default is the target that puts Docker's data back in its default place,
@@ -94,6 +95,9 @@ type State struct {
 	// containers to start again
 	From    string   `json:"from,omitempty"`
 	Running []string `json:"running,omitempty"`
+	// set once a failed switch or start is being undone: a stop then leaves a
+	// switch that may look complete, and must be undone, never kept
+	Undoing bool `json:"undoing,omitempty"`
 }
 
 // Check says whether a folder can take Docker's data.
@@ -214,7 +218,9 @@ func (m *Mover) save() {
 	_ = os.Chmod(f.Name(), 0o644)
 	if err := os.Rename(f.Name(), m.StatePath); err != nil {
 		_ = os.Remove(f.Name())
+		return
 	}
+	syncDir(dir)
 }
 
 func (m *Mover) set(f func(s *State)) {
@@ -247,6 +253,7 @@ func (m *Mover) State() State {
 	s.OldCopy = slices.Clone(s.OldCopy)
 	s.Running = nil
 	s.From = ""
+	s.Undoing = false
 	return s
 }
 
@@ -471,6 +478,11 @@ func (m *Mover) dockerRootProblem(ctx context.Context) string {
 	if root := strings.TrimSpace(out); root != DefaultDir {
 		return fmt.Sprintf("Docker keeps its data in %s (data-root in /etc/docker/daemon.json): this move only knows %s", root, DefaultDir)
 	}
+	// btrfs layers are subvolumes, file systems of their own that the copy
+	// (rsync -x) does not enter: the images would come back empty
+	if driver, _ := m.Run(ctx, "docker", "info", "--format", "{{.Driver}}"); strings.TrimSpace(driver) == "btrfs" {
+		return "Docker stores its images as btrfs subvolumes (storage driver btrfs): this move cannot copy them"
+	}
 	return ""
 }
 
@@ -660,7 +672,7 @@ func (m *Mover) move(target string) {
 	fail := func(err error) {
 		m.set(func(s *State) {
 			s.Phase, s.Message, s.FinishedAt = PhaseFailed, err.Error(), now()
-			s.Location, s.From, s.Running = m.location(), "", nil
+			s.Location, s.From, s.Running, s.Undoing = m.location(), "", nil, false
 		})
 	}
 
@@ -691,6 +703,8 @@ func (m *Mover) move(target string) {
 	// undo puts the switch back; when it cannot, the copy stays and the
 	// message says where the data is
 	undoOrSay := func(undo func() error, copied []string, err error) error {
+		// recorded before anything is undone: Recover finishes the undo
+		m.set(func(s *State) { s.Phase, s.Undoing = PhaseSwitching, true })
 		if undoErr := undo(); undoErr != nil {
 			restart()
 			return fmt.Errorf("%w; putting it back failed too (%v), so nothing was deleted: the data Docker had is in %s, the copy in %s",
@@ -746,10 +760,15 @@ func (m *Mover) move(target string) {
 
 	m.set(func(s *State) { s.Phase = PhaseStarting })
 	if err := m.startAndVerify(ctx, running, images); err != nil {
-		// switching again: a stop during the undo is put back by Recover,
-		// never taken for a move that ended well
-		m.set(func(s *State) { s.Phase = PhaseSwitching })
-		_ = m.quiesce(ctx)
+		// an undo under way from here on: a stop before it ends, even before
+		// it starts, is undone by Recover, never kept as a move that worked
+		m.set(func(s *State) { s.Phase, s.Undoing = PhaseSwitching, true })
+		if qerr := m.quiesce(ctx); qerr != nil {
+			restart()
+			fail(fmt.Errorf("Docker did not come back in %s: %w; it could not be stopped to put things back (%v), so nothing was undone: the data is in %s, the data Docker had before in %s",
+				place(target), err, qerr, place(target), strings.Join(m.dataNow(from), ", ")))
+			return
+		}
 		fail(undoOrSay(undo, copied, fmt.Errorf("Docker did not come back in %s: %w", place(target), err)))
 		return
 	}
@@ -769,7 +788,7 @@ func (m *Mover) finish(from, target string) {
 				s.OldCopy = append(s.OldCopy, p)
 			}
 		}
-		s.Location, s.Target, s.From, s.Running = target, "", "", nil
+		s.Location, s.Target, s.From, s.Running, s.Undoing = target, "", "", nil, false
 		s.OldCopy = slices.DeleteFunc(s.OldCopy, func(p string) bool { return m.inUse(p, target) })
 	})
 }
@@ -845,9 +864,18 @@ func (m *Mover) inUse(p, location string) bool {
 
 func (m *Mover) stopServices(ctx context.Context) error {
 	// the socket would start Docker again at the first request
-	for _, unit := range []string{"docker.socket", "docker.service", "containerd.service"} {
+	units := []string{"docker.socket", "docker.service", "containerd.service"}
+	for _, unit := range units {
 		if _, err := m.Run(ctx, "systemctl", "stop", unit); err != nil && unit != "docker.socket" {
 			return err
+		}
+	}
+	// a socket that would not stop (or a box without one) answers here:
+	// is-active prints one state a unit, and fails when any is not active
+	out, _ := m.Run(ctx, "systemctl", append([]string{"is-active"}, units...)...)
+	for i, state := range strings.Fields(out) {
+		if i < len(units) && (state == "active" || state == "activating" || state == "reloading") {
+			return fmt.Errorf("%s is still %s", units[i], state)
 		}
 	}
 	return nil
@@ -963,7 +991,7 @@ func (m *Mover) switchMounts(ctx context.Context, from, target string) (func() e
 		stuckOf[a.unit] = stuck
 
 		live, aside := m.path(a.live), m.path(a.live+oldSuffix)
-		if err := os.Rename(live, aside); err != nil {
+		if err := renameSynced(live, aside); err != nil {
 			return undo, err
 		}
 		undos = append(undos, func() error {
@@ -973,9 +1001,9 @@ func (m *Mover) switchMounts(ctx context.Context, from, target string) (func() e
 			if err := os.Remove(live); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("%s is not empty, so %s stays as it is: %w", a.live, a.live+oldSuffix, err)
 			}
-			return os.Rename(aside, live)
+			return renameSynced(aside, live)
 		})
-		if err := os.Mkdir(live, 0o711); err != nil {
+		if err := mkdirSynced(live, 0o711); err != nil {
 			return undo, err
 		}
 
@@ -993,10 +1021,10 @@ func (m *Mover) switchMounts(ctx context.Context, from, target string) (func() e
 		if err := os.MkdirAll(filepath.Dir(dropIn), 0o755); err != nil {
 			return undo, err
 		}
-		if err := os.WriteFile(unitFile, []byte(MountUnit(filepath.Join(target, a.name), a.live, target, a.service)), 0o644); err != nil {
+		if err := writeSynced(unitFile, []byte(MountUnit(filepath.Join(target, a.name), a.live, target, a.service)), 0o644); err != nil {
 			return undo, err
 		}
-		if err := os.WriteFile(dropIn, []byte(DropIn(a.live)), 0o644); err != nil {
+		if err := writeSynced(dropIn, []byte(DropIn(a.live)), 0o644); err != nil {
 			return undo, err
 		}
 	}
@@ -1067,8 +1095,8 @@ func (m *Mover) switchToDefault(ctx context.Context, from, _ string) (func() err
 			return err
 		})
 
-		_ = os.Remove(unitFile)
-		_ = os.Remove(dropIn)
+		_ = restore(unitFile, nil)
+		_ = restore(dropIn, nil)
 		// restored, and reloaded, before the enable and the start above run again
 		undos = append(undos, func() error {
 			err := errors.Join(restore(unitFile, prevUnit), restore(dropIn, prevDrop))
@@ -1083,15 +1111,15 @@ func (m *Mover) switchToDefault(ctx context.Context, from, _ string) (func() err
 		if err := os.Remove(live); err != nil {
 			return undo, fmt.Errorf("%s is not empty once unmounted: %w", a.live, err)
 		}
-		if err := os.Rename(fresh, live); err != nil {
-			_ = os.Mkdir(live, 0o711)
+		if err := renameSynced(fresh, live); err != nil {
+			_ = mkdirSynced(live, 0o711)
 			return undo, err
 		}
 		undos = append(undos, func() error {
-			if err := os.Rename(live, fresh); err != nil {
+			if err := renameSynced(live, fresh); err != nil {
 				return err
 			}
-			return os.Mkdir(live, 0o711)
+			return mkdirSynced(live, 0o711)
 		})
 	}
 
@@ -1107,9 +1135,58 @@ func restore(path string, content []byte) error {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
+		syncDir(filepath.Dir(path))
 		return nil
 	}
-	return os.WriteFile(path, content, 0o644)
+	return writeSynced(path, content, 0o644)
+}
+
+// The units, drop-ins and folders a switch changes are on disk before the
+// next step: a power cut seconds after must not boot on an empty unit file
+// or a rename the file system had not written yet.
+
+// writeSynced writes a file and syncs it and its folder.
+func writeSynced(path string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(data)
+	serr := f.Sync()
+	if err := errors.Join(werr, serr, f.Close()); err != nil {
+		return err
+	}
+	syncDir(filepath.Dir(path))
+	return nil
+}
+
+// renameSynced renames and syncs the folders on both sides.
+func renameSynced(from, to string) error {
+	if err := os.Rename(from, to); err != nil {
+		return err
+	}
+	syncDir(filepath.Dir(to))
+	if filepath.Dir(from) != filepath.Dir(to) {
+		syncDir(filepath.Dir(from))
+	}
+	return nil
+}
+
+// mkdirSynced makes a folder and syncs the one holding it.
+func mkdirSynced(path string, perm os.FileMode) error {
+	if err := os.Mkdir(path, perm); err != nil {
+		return err
+	}
+	syncDir(filepath.Dir(path))
+	return nil
+}
+
+// syncDir flushes a folder's entries; best effort.
+func syncDir(dir string) {
+	if f, err := os.Open(dir); err == nil {
+		_ = f.Sync()
+		_ = f.Close()
+	}
 }
 
 func (m *Mover) startAndVerify(ctx context.Context, running []string, images int) error {
@@ -1386,9 +1463,10 @@ func (m *Mover) Recover(ctx context.Context) {
 	var err error
 
 	// a switch that had ended is kept: at boot Docker has run from the new
-	// place already, and what the apps wrote since is there
+	// place already, and what the apps wrote since is there. Never one being
+	// undone: it looks complete until the undo has run
 	kept := cut.Phase == PhaseStarting
-	if cut.Phase == PhaseSwitching && m.switchDone(from, target) {
+	if cut.Phase == PhaseSwitching && !cut.Undoing && m.switchDone(from, target) {
 		kept = true
 		err = m.enableUnits(ctx, target)
 		why = "just after the switch to the new place, which was kept; Docker was started there"
@@ -1400,9 +1478,12 @@ func (m *Mover) Recover(ctx context.Context) {
 		// at boot Docker starts before this service, from whatever the
 		// folders are now: it stops, socket first, and lets go of its mounts
 		// before any folder under it changes; if it cannot, nothing does
+		var aside []string
 		if qerr := m.quiesce(ctx); qerr != nil {
 			err = qerr
 			why = "and Docker could not be stopped to put it right, so nothing was changed"
+		} else if aside, err = m.setAsideBootFolders(from); err != nil {
+			why = "and a folder Docker started on at boot could not be set aside, so nothing else was changed"
 		} else if cut.Phase == PhaseSwitching {
 			if from == "" {
 				err = m.backToDefault(ctx, target)
@@ -1416,6 +1497,9 @@ func (m *Mover) Recover(ctx context.Context) {
 		} else { // stopping, copying
 			err = m.dropCopies(ctx, from, target)
 			why = "while Docker was stopped for the copy; the partial copy was deleted and nothing else changed"
+		}
+		if len(aside) > 0 {
+			why += fmt.Sprintf(" (Docker had started at boot on an empty folder; what it wrote there is kept in %s)", strings.Join(aside, ", "))
 		}
 	}
 
@@ -1434,7 +1518,7 @@ func (m *Mover) Recover(ctx context.Context) {
 			s.Phase = PhaseFailed
 		}
 		s.Message, s.FinishedAt = msg, now()
-		s.Location, s.Target, s.From, s.Running = m.location(), "", "", nil
+		s.Location, s.Target, s.From, s.Running, s.Undoing = m.location(), "", "", nil, false
 	})
 }
 
@@ -1462,10 +1546,18 @@ func (m *Mover) switchDone(from, target string) bool {
 			if exists(m.path(a.live+newSuffix)) || unitErr == nil {
 				return false
 			}
+			// the copy in place, not an empty folder Docker started on
+			if a.name == "docker" && emptyOrMissing(m.path(a.live)) {
+				return false
+			}
 			continue
 		}
 		src := filepath.Join(target, a.name)
 		if !exists(m.path(src)) {
+			// a disk not there at boot shows no copy: never a switch that ended
+			if a.name == "docker" || exists(m.path(a.live+oldSuffix)) {
+				return false
+			}
 			continue
 		}
 		if unitErr != nil || unitValue(string(unit), "What") != src || !exists(m.path(dropInPath(a.service))) {
@@ -1473,6 +1565,41 @@ func (m *Mover) switchDone(from, target string) bool {
 		}
 	}
 	return m.checkSwitched(from, target) == nil
+}
+
+// setAsideBootFolders moves aside a live folder that is no mount, holds
+// something, and whose data waits next to it: .casaos-old on a move from the
+// default place, .casaos-new on the way back. The folder was empty at a stop
+// mid-switch, Docker started on it at boot, and putting the switch back would
+// stop on it. It is kept, as <live>.casaos-boot, and its name returned for
+// the message.
+func (m *Mover) setAsideBootFolders(from string) ([]string, error) {
+	var aside []string
+	for _, a := range areas {
+		waiting := a.live + oldSuffix
+		if from != "" {
+			waiting = a.live + newSuffix
+		}
+		if !exists(m.path(waiting)) {
+			continue
+		}
+		if emptyOrMissing(m.path(a.live)) || slices.Contains(m.mountsUnder(a.live, true), a.live) {
+			continue
+		}
+		to := a.live + bootSuffix
+		for i := 2; exists(m.path(to)); i++ {
+			to = fmt.Sprintf("%s%s-%d", a.live, bootSuffix, i)
+		}
+		if err := os.Rename(m.path(a.live), m.path(to)); err != nil {
+			return aside, err
+		}
+		if err := os.Mkdir(m.path(a.live), 0o711); err != nil {
+			return aside, err
+		}
+		syncDir(m.path(filepath.Dir(a.live)))
+		aside = append(aside, to)
+	}
+	return aside, nil
 }
 
 // enableUnits makes sure the mount units of a switch to target are enabled
@@ -1533,7 +1660,7 @@ func (m *Mover) backToDefault(ctx context.Context, target string) error {
 			errs = append(errs, fmt.Errorf("%s is not empty, so %s stays as it is: %w", a.live, a.live+oldSuffix, err))
 			continue
 		}
-		if err := os.Rename(m.path(a.live+oldSuffix), m.path(a.live)); err != nil {
+		if err := renameSynced(m.path(a.live+oldSuffix), m.path(a.live)); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -1552,7 +1679,7 @@ func (m *Mover) backToFolder(ctx context.Context, from string) error {
 		live := m.path(a.live)
 		// a live folder that was switched holds the new copy: it goes aside, to be deleted
 		if !emptyOrMissing(live) && !m.SameDir(a.live, src) {
-			if err := os.Rename(live, m.path(a.live+newSuffix)); err != nil {
+			if err := renameSynced(live, m.path(a.live+newSuffix)); err != nil {
 				errs = append(errs, err)
 				continue
 			}
@@ -1566,8 +1693,8 @@ func (m *Mover) backToFolder(ctx context.Context, from string) error {
 			continue
 		}
 		errs = append(errs,
-			os.WriteFile(m.path(unitPath(a.unit)), []byte(MountUnit(src, a.live, from, a.service)), 0o644),
-			os.WriteFile(m.path(dropInPath(a.service)), []byte(DropIn(a.live)), 0o644))
+			writeSynced(m.path(unitPath(a.unit)), []byte(MountUnit(src, a.live, from, a.service)), 0o644),
+			writeSynced(m.path(dropInPath(a.service)), []byte(DropIn(a.live)), 0o644))
 	}
 	if _, err := m.Run(ctx, "systemctl", "daemon-reload"); err != nil {
 		errs = append(errs, err)

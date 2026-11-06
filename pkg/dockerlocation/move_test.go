@@ -32,6 +32,9 @@ type fakeDocker struct {
 	// services whose stop fails; hook sees every call before it runs
 	stuck map[string]bool
 	hook  func(call string)
+	// what systemctl is-active prints, and Docker's storage driver
+	isActive string
+	driver   string
 }
 
 func newFakeDocker(m *Mover) *fakeDocker {
@@ -89,6 +92,8 @@ func (d *fakeDocker) run(_ context.Context, name string, args ...string) (string
 			}
 		}
 		return "", nil
+	case name == "systemctl" && args[0] == "is-active":
+		return d.isActive, nil
 	case name == "systemctl":
 		return "", nil
 	case name != "docker":
@@ -100,6 +105,9 @@ func (d *fakeDocker) run(_ context.Context, name string, args ...string) (string
 	}
 	switch args[0] {
 	case "info":
+		if slices.Contains(args, "{{.Driver}}") {
+			return d.driver + "\n", nil
+		}
 		return "/var/lib/docker\n", nil
 	case "ps":
 		return strings.Join(d.running, "\n"), nil

@@ -12,9 +12,10 @@ import (
 	"testing"
 )
 
-// wayBackCut is a way back cut short by a power cut after docker was
-// switched (its unit gone, the fresh copy in place) and before containerd
-// was. At boot Docker started from the fresh copy and runs.
+// wayBackCut is a way back cut short by a power cut after containerd was
+// switched (its unit gone, the fresh copy in place) and before docker was:
+// areas go containerd first. At boot both started, containerd from its fresh
+// copy, Docker on its mount, and they run.
 func wayBackCut(t *testing.T) (*Mover, *fakeDocker) {
 	t.Helper()
 	m, d := moved(t)
@@ -22,11 +23,11 @@ func wayBackCut(t *testing.T) (*Mover, *fakeDocker) {
 		_ = os.RemoveAll(m.path(a.live))
 		_ = os.Mkdir(m.path(a.live), 0o711)
 	}
-	os.Remove(m.path(unitPath("var-lib-docker.mount")))
-	os.Remove(m.path(dropInPath("docker.service")))
-	d.mounted["var-lib-docker.mount"] = false
-	os.WriteFile(m.path("/var/lib/docker/fresh"), []byte("written since boot"), 0o644)
-	os.MkdirAll(m.path("/var/lib/containerd"+newSuffix), 0o711)
+	os.Remove(m.path(unitPath("var-lib-containerd.mount")))
+	os.Remove(m.path(dropInPath("containerd.service")))
+	d.mounted["var-lib-containerd.mount"] = false
+	os.WriteFile(m.path("/var/lib/containerd/fresh"), []byte("written since boot"), 0o644)
+	os.MkdirAll(m.path("/var/lib/docker"+newSuffix), 0o711)
 	if up, _ := d.state(); !up {
 		t.Fatal("Docker should run, as at boot")
 	}
@@ -45,10 +46,10 @@ func TestRecoverStopsARunningDockerBeforeTouchingFolders(t *testing.T) {
 	var atStop []string
 	d.hook = func(call string) {
 		if call == "systemctl stop docker.socket" {
-			if !there(m, "/var/lib/docker/fresh") {
+			if !there(m, "/var/lib/containerd/fresh") {
 				atStop = append(atStop, "the live folder was moved before Docker stopped")
 			}
-			if there(m, unitPath("var-lib-docker.mount")) {
+			if there(m, unitPath("var-lib-containerd.mount")) {
 				atStop = append(atStop, "the unit was written before Docker stopped")
 			}
 		}
@@ -92,10 +93,10 @@ func TestRecoverChangesNothingWhenDockerWillNotStop(t *testing.T) {
 	if s.Phase != PhaseFailed || !strings.Contains(s.Message, "nothing was changed") {
 		t.Fatalf("%+v", s)
 	}
-	if b, _ := os.ReadFile(m.path("/var/lib/docker/fresh")); string(b) != "written since boot" {
+	if b, _ := os.ReadFile(m.path("/var/lib/containerd/fresh")); string(b) != "written since boot" {
 		t.Errorf("the live folder changed: %q", b)
 	}
-	if !there(m, "/var/lib/containerd"+newSuffix) || there(m, unitPath("var-lib-docker.mount")) {
+	if !there(m, "/var/lib/docker"+newSuffix) || there(m, unitPath("var-lib-containerd.mount")) {
 		t.Error("the folders or units changed")
 	}
 	for _, c := range d.calls[before:] {
