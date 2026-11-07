@@ -621,11 +621,34 @@ func (m *Mover) measure() usage {
 // errBusy is the answer while a move, a delete or a recovery runs.
 var errBusy = errors.New("a move is under way")
 
+// lockIdle takes the move lock. A move records that it ended a moment before
+// it lets go of the lock: when the state says a move just ended, the lock is
+// waited for briefly instead of refusing the click that follows. Anything
+// else holding it (a check under way, Recover) is refused at once.
+func (m *Mover) lockIdle() bool {
+	if m.moving.TryLock() {
+		return true
+	}
+	if p := m.State().Phase; p != PhaseDone && p != PhaseFailed {
+		return false
+	}
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+		if m.moving.TryLock() {
+			return true
+		}
+		if m.State().busy() {
+			return false
+		}
+	}
+	return false
+}
+
 // Start begins a move to target in the background, after checking it. From
 // the check to the end of the move nothing else can start: a second click
 // while a slow check runs is refused, not a second move into the same folder.
 func (m *Mover) Start(target string) (State, error) {
-	if !m.moving.TryLock() {
+	if !m.lockIdle() {
 		return m.State(), errBusy
 	}
 	// a move cut short is Recover's first: it acts on what it read at start
@@ -1426,7 +1449,7 @@ func (m *Mover) removeTree(ctx context.Context, p string) error {
 // DeleteOldCopy deletes what the last move left behind. Each folder is
 // looked at first: never one Docker uses, whatever the list says.
 func (m *Mover) DeleteOldCopy() (State, error) {
-	if !m.moving.TryLock() {
+	if !m.lockIdle() {
 		return m.State(), errBusy
 	}
 	defer m.moving.Unlock()

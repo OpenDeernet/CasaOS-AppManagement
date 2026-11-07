@@ -452,3 +452,31 @@ func TestRecoverWithNothingCutShort(t *testing.T) {
 		t.Errorf("%v", d.calls)
 	}
 }
+
+// A move says it ended a moment before it lets go of the lock: the click that
+// follows waits for it, while a lock held for anything else is refused.
+func TestTheLockIsWaitedForRightAfterAMove(t *testing.T) {
+	m := liveHost(t)
+	newFakeDocker(m)
+
+	m.moving.Lock()
+	m.set(func(s *State) { s.Phase = PhaseDone })
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		m.moving.Unlock()
+	}()
+	if _, err := m.DeleteOldCopy(); errors.Is(err, errBusy) {
+		t.Errorf("refused right after a move: %v", err)
+	}
+
+	m.moving.Lock()
+	defer m.moving.Unlock()
+	m.set(func(s *State) { s.Phase = PhaseIdle })
+	start := time.Now()
+	if _, err := m.DeleteOldCopy(); !errors.Is(err, errBusy) {
+		t.Errorf("a held lock with no move ended: %v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Error("waited for a lock held for something else")
+	}
+}
