@@ -172,6 +172,22 @@ func (e *Engine) Held(destination string) bool {
 	return err == nil
 }
 
+// Password is the key this box keeps for a destination's repository, read back so
+// its owner can keep a copy away from this box: the box's own backup leaves it out.
+func (e *Engine) Password(destination string) (string, error) {
+	key, err := keyPath(destination)
+	if err != nil {
+		return "", err
+	}
+
+	raw, err := os.ReadFile(key)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", ErrNotKept
+	}
+
+	return string(raw), err
+}
+
 // Enabled says whether the backups to come at a destination go into restic.
 func (e *Engine) Enabled(destination string) bool {
 	if !e.Held(destination) {

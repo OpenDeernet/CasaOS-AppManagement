@@ -86,6 +86,27 @@ func TestEnableMakesARepositoryAndHandsBackThePassword(t *testing.T) {
 	}
 }
 
+// The password can be read again while the box keeps the key, and only then.
+func TestThePasswordCanBeReadBackWhileTheKeyIsKept(t *testing.T) {
+	f := &fake{replies: map[string]func() ([]byte, error){"cat": reply("", &ExitError{Code: exitNoRepository})}}
+	e := engineWith(t, f)
+
+	if _, err := e.Password("nas"); !errors.Is(err, ErrNotKept) {
+		t.Fatalf("no key yet: %v", err)
+	}
+
+	given, err := e.Enable(context.Background(), "nas", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read, err := e.Password("nas"); err != nil || read != given {
+		t.Fatalf("read %q (%v), was given %q", read, err, given)
+	}
+	if _, err := e.Password("../nas"); !errors.Is(err, errBadName) {
+		t.Fatalf("a path for a name: %v", err)
+	}
+}
+
 func TestEnableOpensARepositoryThatIsAlreadyThere(t *testing.T) {
 	f := &fake{}
 	e := engineWith(t, f)

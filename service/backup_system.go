@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"slices"
 	"time"
 
 	"github.com/ReCasaOS/CasaOS-Common/utils/logger"
@@ -62,10 +63,17 @@ func (systemdControl) Restart(unit string) error {
 // Systemd is the real thing.
 func Systemd() unitControl { return systemdControl{} }
 
+// systemBackupPaths is systemPaths and the backup schedules, whose file follows
+// the data path, so it is read at the moment of the backup, not fixed.
+func systemBackupPaths() []string {
+	return append(slices.Clone(systemPaths), BackupSchedulePath)
+}
+
 // SystemBackupInventory lists what the box is, as backup entries.
 func SystemBackupInventory(exists func(string) bool) []BackupEntry {
-	entries := make([]BackupEntry, 0, len(systemPaths))
-	for _, p := range systemPaths {
+	paths := systemBackupPaths()
+	entries := make([]BackupEntry, 0, len(paths))
+	for _, p := range paths {
 		entry := BackupEntry{Kind: BackupKindBind, Path: p, Target: p}
 		if !exists(p) {
 			entry.Skip = "not present on this box"

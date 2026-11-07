@@ -968,8 +968,8 @@ paths:
         counts them all.
 
         Without a `password` a new repository is made with a new password, which is
-        **returned here and nowhere else**: a repository whose password is lost
-        cannot be read by anyone. With one, the destination is attached to the
+        returned here, and read back later from `GET .../restic/password`: a
+        repository whose password is lost cannot be read by anyone. With one, the destination is attached to the
         repository already there -- how backups are reached again on another box.
 
         A destination that was switched back (`DELETE`) still has its key on this
@@ -1011,6 +1011,29 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/ResponseOK"
+        "400":
+          $ref: "#/components/responses/ResponseBadRequest"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+
+  /backup/destinations/{name}/restic/password:
+    get:
+      summary: The password of a destination's restic repository
+      description: |
+        The key this box keeps for the repository at this destination, so that its
+        owner can keep a copy elsewhere: the box's own backup does not hold it, and a
+        box that is lost takes it along. Answered while the box keeps the key, also
+        after the destination was switched back to rclone.
+
+        A destination whose key this box does not keep is refused.
+      operationId: backupDestinationResticPassword
+      tags:
+        - Backup methods
+      parameters:
+        - $ref: "#/components/parameters/BackupDestinationName"
+      responses:
+        "200":
+          $ref: "#/components/responses/BackupDestinationResticPasswordOK"
         "400":
           $ref: "#/components/responses/ResponseBadRequest"
         "500":
@@ -3810,7 +3833,7 @@ components:
       properties:
         password:
           type: string
-          description: Opens the repository. Shown once.
+          description: Opens the repository.
 
     BackupHeldApp:
       description: One app a destination holds backups of.

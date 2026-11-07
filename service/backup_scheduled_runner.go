@@ -21,6 +21,15 @@ func NewScheduledBackupRunner() *scheduledBackupRunner { //nolint:revive // deli
 }
 
 func (r *scheduledBackupRunner) Run(ctx context.Context, schedule BackupSchedule, stamp string) (BackupManifest, error) {
+	// The box itself is filed as one more app, and scheduled like one.
+	if schedule.App == SystemBackupName {
+		return RunSystemBackup(ctx, restic.NewRouter(), Systemd(), SystemBackupOptions{
+			Destination: schedule.Destination,
+			Stamp:       stamp,
+			HoldStill:   schedule.HoldStill,
+		})
+	}
+
 	// Looked up now rather than remembered in the schedule: an app can be
 	// uninstalled between the moment a schedule is saved and tonight, and a
 	// schedule pointing at nothing should say so rather than fail obscurely.

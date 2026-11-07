@@ -35,8 +35,8 @@ func TestTheBoxIsAFixedListAndAbsentPartsAreSkippedWithAReason(t *testing.T) {
 	if len(manifest.Operations) != 3 {
 		t.Fatalf("three present: %+v", manifest.Operations)
 	}
-	if len(manifest.Skipped) != 2 || !strings.Contains(manifest.Skipped[0].Skip, "not present") {
-		t.Fatalf("two absent, with the reason: %+v", manifest.Skipped)
+	if len(manifest.Skipped) != 3 || !strings.Contains(manifest.Skipped[0].Skip, "not present") {
+		t.Fatalf("three absent, with the reason: %+v", manifest.Skipped)
 	}
 	for _, op := range manifest.Operations {
 		if op.Kind != BackupKindBind || !strings.HasPrefix(op.Destination, "binds/") {
@@ -112,7 +112,7 @@ func TestABoxRestoreUsesThisBoxesPathsAndRestartsRcloneLast(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(report.Restored) != len(systemPaths) {
+	if len(report.Restored) != len(systemBackupPaths()) {
 		t.Fatalf("everything the backup held: %+v", report)
 	}
 	for _, call := range restorer.restored {
@@ -151,7 +151,7 @@ func TestABackupOfAnAppIsNotPouredIntoTheBox(t *testing.T) {
 func TestEachPartOfTheBoxGoesBackToItsOwnPathWhateverNumberItLandedUnder(t *testing.T) {
 	logInTempDir(t)
 
-	// taken on a box with no Samba config: four parts, numbered 1..4
+	// taken on a box with no Samba config: five parts, numbered 1..5
 	present := func(p string) bool { return p != "/etc/samba/smb.casa.conf" }
 	manifest := PlanBackup(SystemBackupName, SystemBackupInventory(present), nil)
 	for i := range manifest.Operations {
@@ -166,8 +166,8 @@ func TestEachPartOfTheBoxGoesBackToItsOwnPathWhateverNumberItLandedUnder(t *test
 		t.Fatal(err)
 	}
 
-	if len(report.Restored) != 4 || len(report.Missing) != 0 {
-		t.Fatalf("four parts back, nothing missing: %+v", report)
+	if len(report.Restored) != 5 || len(report.Missing) != 0 {
+		t.Fatalf("five parts back, nothing missing: %+v", report)
 	}
 	for _, call := range restorer.restored {
 		// binds/2 in this backup is the database folder, and it must land there

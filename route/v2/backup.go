@@ -163,7 +163,7 @@ func (a *AppManagement) CheckBackupDestinationRestic(ctx echo.Context, name code
 }
 
 // EnableBackupDestinationRestic switches a destination to restic and hands back
-// the password of its repository, the one time it is shown.
+// the password of its repository (read back later by BackupDestinationResticPassword).
 func (a *AppManagement) EnableBackupDestinationRestic(ctx echo.Context, name codegen.BackupDestinationName) error {
 	var spec codegen.BackupDestinationResticSpec
 	if err := ctx.Bind(&spec); err != nil {
@@ -184,6 +184,27 @@ func (a *AppManagement) EnableBackupDestinationRestic(ctx echo.Context, name cod
 
 		return backupError(ctx, err)
 	}
+
+	return ctx.JSON(http.StatusOK, codegen.BackupDestinationResticPasswordOK{
+		Message: utils.Ptr("OK"),
+		Data:    &codegen.BackupDestinationResticPassword{Password: password},
+	})
+}
+
+// BackupDestinationResticPassword reads back the password of a destination's
+// repository, for its owner to keep away from this box.
+func (a *AppManagement) BackupDestinationResticPassword(ctx echo.Context, name codegen.BackupDestinationName) error {
+	password, err := restic.New().Password(string(name))
+	if err != nil {
+		if errors.Is(err, restic.ErrNotKept) {
+			return backupBadRequest(ctx, err)
+		}
+
+		return backupError(ctx, err)
+	}
+
+	// a secret: not to be kept by a browser or a proxy on the way
+	ctx.Response().Header().Set("Cache-Control", "no-store")
 
 	return ctx.JSON(http.StatusOK, codegen.BackupDestinationResticPasswordOK{
 		Message: utils.Ptr("OK"),
