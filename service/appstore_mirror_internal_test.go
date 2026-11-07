@@ -77,3 +77,19 @@ func TestBothGoneIsOneErrorNamingBoth(t *testing.T) {
 		t.Fatalf("want an error that names the mirror too, got %v", err)
 	}
 }
+
+func TestTheRecasaosCatalogueHasACopyOnAnotherHost(t *testing.T) {
+	logger.LogInitConsoleOnly()
+	head := func(url string) (*http.Response, error) {
+		if url == recasaosCatalogue {
+			return &http.Response{StatusCode: http.StatusBadGateway}, nil
+		}
+
+		return &http.Response{StatusCode: http.StatusOK, ContentLength: 9}, nil
+	}
+
+	source, _, err := pickCatalogueSource(recasaosCatalogue, head)
+	if err != nil || !strings.Contains(source, "jsdelivr") || !strings.Contains(source, "@catalogue/store/recasaos.zip") {
+		t.Fatalf("got %q %v", source, err)
+	}
+}

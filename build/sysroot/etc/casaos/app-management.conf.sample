@@ -17,5 +17,5 @@ AppsPath = /var/lib/casaos/apps
 ; LogsIncludeOthers = false
 
 [server]
-appstore = https://cdn.jsdelivr.net/gh/IceWhaleTech/CasaOS-AppStore@gh-pages/store/main.zip
-appstore = https://github.com/bigbeartechworld/big-bear-casaos/archive/refs/heads/master.zip
+; the ReCasaOS catalogue: IceWhale's store, RoqueOS's list and the Big Bear fork, merged every night
+appstore = https://raw.githubusercontent.com/ReCasaOS/_appstore/catalogue/store/recasaos.zip
