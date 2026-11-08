@@ -137,7 +137,7 @@ func RunSystemBackup(ctx context.Context, copier BackupCopier, units unitControl
 			}
 		}
 
-		return copyPlan(ctx, manifest, copier, opts.Destination, RootFor(SystemBackupName, opts.Stamp))
+		return copyPlan(ctx, &manifest, copier, opts.Destination, RootFor(SystemBackupName, opts.Stamp))
 	}()
 	if err != nil {
 		publishBackupError(ctx, err)

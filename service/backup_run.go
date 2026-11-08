@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -154,12 +155,15 @@ func runBackup(ctx context.Context, app *ComposeApp, docker backupDocker, copier
 		}
 	}
 
-	return manifest, copyPlan(ctx, manifest, copier, opts.Destination, RootFor(app.Name, opts.Stamp))
+	err := copyPlan(ctx, &manifest, copier, opts.Destination, RootFor(app.Name, opts.Stamp))
+
+	return manifest, err
 }
 
-// copyPlan carries out a manifest's operations, in order, then writes the
-// manifest at the root. Shared by an app's backup and the box's own.
-func copyPlan(ctx context.Context, manifest BackupManifest, copier BackupCopier, destinationName, root string) error {
+// copyPlan carries out a manifest's operations, in order, adds up what they
+// read, then writes the manifest at the root. Shared by an app's backup and the
+// box's own.
+func copyPlan(ctx context.Context, manifest *BackupManifest, copier BackupCopier, destinationName, root string) error {
 	for i, operation := range manifest.Operations {
 		publishBackupProgress(ctx, i, len(manifest.Operations)+1, operation.Destination)
 		destination := path.Join(root, operation.Destination)
@@ -174,11 +178,41 @@ func copyPlan(ctx context.Context, manifest BackupManifest, copier BackupCopier,
 		if err != nil {
 			return fmt.Errorf("copying %s: %w", operation.Source, err)
 		}
+		manifest.Bytes += sourceBytes(operation)
 	}
 
 	publishBackupProgress(ctx, len(manifest.Operations), len(manifest.Operations)+1, ManifestFileName)
 
-	return writeManifest(ctx, manifest, copier, destinationName, root)
+	return writeManifest(ctx, *manifest, copier, destinationName, root)
+}
+
+// sourceBytes is the size of what an operation read, measured on this host: a
+// file's size, or the regular files under a folder added up. Measured here
+// rather than asked of the engine, so rclone and restic answer alike; a file
+// that cannot be read counts for nothing, the copy itself has said what failed.
+func sourceBytes(operation BackupOperation) int64 {
+	if !operation.Directory {
+		info, err := os.Stat(operation.Source)
+		if err != nil || !info.Mode().IsRegular() {
+			return 0
+		}
+
+		return info.Size()
+	}
+
+	var total int64
+	_ = filepath.WalkDir(operation.Source, func(_ string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		if info, err := entry.Info(); err == nil && info.Mode().IsRegular() {
+			total += info.Size()
+		}
+
+		return nil
+	})
+
+	return total
 }
 
 // writeManifest puts the manifest at the root of the backup.

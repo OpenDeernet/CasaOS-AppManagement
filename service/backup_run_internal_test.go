@@ -294,3 +294,32 @@ func TestAnAppWithNoEnvBacksUpWithoutOne(t *testing.T) {
 		t.Fatalf("nothing was skipped either -- there was nothing to skip: %+v", manifest.Skipped)
 	}
 }
+
+// The size of a backup is what its operations read on this host, a file's size
+// and the files under a folder added up, whichever engine carried it.
+func TestARunAddsUpTheBytesItRead(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "config", "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, size := range map[string]int{"config/a.ini": 3, "config/sub/b.db": 5, "settings.env": 9} {
+		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), make([]byte, size), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	slash := filepath.ToSlash(dir)
+
+	manifest := BackupManifest{Operations: []BackupOperation{
+		{Source: slash + "/config", Destination: "config", Directory: true},
+		{Source: slash + "/settings.env", Destination: "settings.env"},
+		// a source that is gone reads as nothing; the copy would have said so
+		{Source: slash + "/missing", Destination: "missing"},
+	}}
+	if err := copyPlan(context.Background(), &manifest, &fakeCopier{}, "offsite", "demo/2026-09-12T20-20-29Z"); err != nil {
+		t.Fatal(err)
+	}
+
+	if manifest.Bytes != 17 {
+		t.Fatalf("3 + 5 + 9 bytes, got %d", manifest.Bytes)
+	}
+}

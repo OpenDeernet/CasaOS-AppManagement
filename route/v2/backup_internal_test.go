@@ -55,7 +55,7 @@ func TestEveryFieldOfARunReachesTheAPI(t *testing.T) {
 	record := service.BackupRunRecord{
 		App: "smoke", Destination: "offsite", Stamp: "2026-09-13T03-06-54Z",
 		StartedAt: now, FinishedAt: now.Add(3 * time.Second),
-		Scheduled: true, ContainersStopped: true, Copied: 2, SkippedCount: 1,
+		Scheduled: true, ContainersStopped: true, Copied: 2, SkippedCount: 1, Bytes: 3,
 		Error: "nope", Restore: true,
 	}
 

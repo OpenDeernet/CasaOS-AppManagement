@@ -47,6 +47,7 @@ func finishBackupRecordWith(record *BackupRunRecord, manifest BackupManifest, er
 	}
 	record.Copied = len(manifest.Operations)
 	record.SkippedCount = len(manifest.Skipped)
+	record.Bytes = manifest.Bytes
 	if err != nil {
 		record.Error = err.Error()
 	}

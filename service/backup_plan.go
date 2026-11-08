@@ -42,6 +42,10 @@ type BackupManifest struct {
 	App           string `json:"app"`
 	// Operations, in the order they were planned
 	Operations []BackupOperation `json:"operations"`
+	// Bytes is the size of what the operations copied, measured on this host as
+	// each one went: a file's size, the files under a folder added up. What the
+	// destination holds may be less (restic keeps one copy of a block it has seen).
+	Bytes int64 `json:"bytes,omitempty"`
 	// Skipped says what was deliberately left out, with the reason, so the person
 	// restoring finds out here rather than by noticing something missing later.
 	Skipped []BackupEntry `json:"skipped,omitempty"`

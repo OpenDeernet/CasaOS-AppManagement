@@ -3704,6 +3704,10 @@ components:
           type: integer
         skipped_count:
           type: integer
+        bytes:
+          type: integer
+          format: int64
+          description: The size of what was read for the copy, measured on the box. 0 for a restore.
         error:
           type: string
           description: Empty when the run succeeded.

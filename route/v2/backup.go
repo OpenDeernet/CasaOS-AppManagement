@@ -586,7 +586,7 @@ func backupRunOut(record service.BackupRunRecord) codegen.BackupRunRecord {
 		App: &record.App, Destination: &record.Destination, Stamp: &record.Stamp,
 		StartedAt: &record.StartedAt, FinishedAt: &record.FinishedAt,
 		Scheduled: &record.Scheduled, ContainersStopped: &record.ContainersStopped,
-		Copied: &record.Copied, SkippedCount: &record.SkippedCount,
+		Copied: &record.Copied, SkippedCount: &record.SkippedCount, Bytes: &record.Bytes,
 		Error: &record.Error, Restore: &record.Restore,
 	}
 }
