@@ -713,14 +713,19 @@ func (a *AppManagement) BackupSignInFinish(ctx echo.Context) error {
 		return ctx.JSON(http.StatusBadRequest, codegen.ResponseBadRequest{Message: &message})
 	}
 
-	token, err := rclone.CompleteSignIn(spec.Redirected)
+	token, parameters, err := rclone.CompleteSignIn(spec.Redirected)
 	if err != nil {
 		return signInError(ctx, err)
 	}
 
+	data := &codegen.BackupSignInToken{Token: &token}
+	if parameters != nil {
+		data.Parameters = &parameters
+	}
+
 	return ctx.JSON(http.StatusOK, codegen.BackupSignInFinishOK{
 		Message: utils.Ptr("OK"),
-		Data:    &codegen.BackupSignInToken{Token: &token},
+		Data:    data,
 	})
 }
 

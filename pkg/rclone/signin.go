@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -35,10 +36,15 @@ import (
 // exactly this address.
 const signInAddr = "127.0.0.1:53682"
 
-// signInBackends are the drives whose token rclone authorize hands over whole.
-// OneDrive also needs a drive_id and a drive_type, which only its own configuration
-// finds out, so it keeps the longer instructions.
-var signInBackends = []string{"drive", "dropbox"}
+// signInBackends are the drives the box signs in to. OneDrive also needs a drive_id
+// and a drive_type, which the box asks Microsoft for once it has the token, the way
+// rclone config does.
+var signInBackends = []string{"drive", "dropbox", "onedrive"}
+
+// graphURL is where OneDrive's drive is looked up.
+// shortcut: Microsoft's global cloud only; the national clouds (China, US government)
+// keep the manual steps, until someone needs them.
+var graphURL = "https://graph.microsoft.com/v1.0"
 
 // ErrNoSignIn is what completing a sign-in says when none is waiting: it was never
 // started, it timed out, or a newer one took its place.
@@ -62,12 +68,13 @@ var (
 var authLink = regexp.MustCompile(`https?://\S+/auth\?state=\S+`)
 
 type signIn struct {
-	state  string
-	cancel context.CancelFunc
-	exited chan struct{}
-	token  chan string
-	mu     sync.Mutex
-	output bytes.Buffer
+	backend string
+	state   string
+	cancel  context.CancelFunc
+	exited  chan struct{}
+	token   chan string
+	mu      sync.Mutex
+	output  bytes.Buffer
 }
 
 // One at a time: rclone listens on a fixed port, so a second sign-in could not
@@ -104,7 +111,7 @@ func SignIn(backend string) (string, error) {
 		return "", fmt.Errorf("%w: %s", ErrDaemonUnreachable, err)
 	}
 
-	s := &signIn{cancel: cancel, exited: make(chan struct{}), token: make(chan string, 1)}
+	s := &signIn{backend: backend, cancel: cancel, exited: make(chan struct{}), token: make(chan string, 1)}
 	link := make(chan string, 1)
 
 	go func() {
@@ -136,37 +143,83 @@ func SignIn(backend string) (string, error) {
 }
 
 // CompleteSignIn takes the address of the page the provider redirected to -- the
-// one that failed to load -- and returns the token rclone then produced.
-func CompleteSignIn(redirected string) (string, error) {
+// one that failed to load -- and returns the token rclone then produced, with the
+// other options that backend needs (OneDrive's drive_id and drive_type), if any.
+func CompleteSignIn(redirected string) (string, map[string]string, error) {
 	currentMu.Lock()
 	s := current
 	currentMu.Unlock()
 
 	if s == nil {
-		return "", ErrNoSignIn
+		return "", nil, ErrNoSignIn
 	}
 
 	query, err := redirectQuery(redirected, s.state)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	// Only the query is replayed, onto the address rclone listens on: what was
 	// pasted never decides where this box connects.
 	response, err := http.Get("http://" + signInAddr + "/?" + query) //nolint:gosec,noctx // fixed loopback address
 	if err != nil {
-		return "", ErrNoSignIn
+		return "", nil, ErrNoSignIn
 	}
 	_ = response.Body.Close()
 
 	select {
 	case token := <-s.token:
-		return token, nil
+		if s.backend != "onedrive" {
+			return token, nil, nil
+		}
+		parameters, err := oneDrive(token)
+		if err != nil {
+			return "", nil, err
+		}
+
+		return token, parameters, nil
 	case <-s.exited:
-		return "", s.failure("rclone stopped before it gave a token")
+		return "", nil, s.failure("rclone stopped before it gave a token")
 	case <-time.After(signInFinish):
-		return "", errors.New("rclone did not give a token: start the sign-in again")
+		return "", nil, errors.New("rclone did not give a token: start the sign-in again")
 	}
+}
+
+// oneDrive asks Microsoft which drive the account signed in to has -- what rclone
+// config does when "OneDrive Personal or Business" is picked -- and returns the
+// drive_id and drive_type rclone needs with the token.
+func oneDrive(token string) (map[string]string, error) {
+	var parsed struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal([]byte(token), &parsed); err != nil || parsed.AccessToken == "" {
+		return nil, errors.New("rclone gave a OneDrive token without an access token")
+	}
+
+	request, err := http.NewRequest(http.MethodGet, graphURL+"/me/drive", nil) //nolint:noctx // bounded by the client's timeout
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+parsed.AccessToken)
+
+	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("could not ask Microsoft for the OneDrive drive: %w", err)
+	}
+	defer response.Body.Close()
+
+	var drive struct {
+		ID        string `json:"id"`
+		DriveType string `json:"driveType"`
+	}
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("asking Microsoft for the OneDrive drive failed: %s", response.Status)
+	}
+	if err := json.NewDecoder(response.Body).Decode(&drive); err != nil || drive.ID == "" || drive.DriveType == "" {
+		return nil, errors.New("the account has no OneDrive drive: is OneDrive set up on it?")
+	}
+
+	return map[string]string{"drive_id": drive.ID, "drive_type": drive.DriveType}, nil
 }
 
 // stopCurrent ends the sign-in in progress and waits for rclone to let go of its

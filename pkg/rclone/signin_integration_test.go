@@ -31,7 +31,7 @@ func TestSignInWithARealRclone(t *testing.T) {
 	}
 
 	// a wrong state is refused here: sent on, it would end rclone's sign-in
-	if _, err := CompleteSignIn("http://127.0.0.1:53682/?state=wrong&code=c"); err == nil || !strings.Contains(err.Error(), "another sign-in") {
+	if _, _, err := CompleteSignIn("http://127.0.0.1:53682/?state=wrong&code=c"); err == nil || !strings.Contains(err.Error(), "another sign-in") {
 		t.Fatalf("want a refusal, got %v", err)
 	}
 
@@ -42,5 +42,13 @@ func TestSignInWithARealRclone(t *testing.T) {
 	}
 	if !strings.HasPrefix(second, "https://www.dropbox.com/") {
 		t.Fatalf("not Dropbox's sign-in: %s", second)
+	}
+
+	third, err := SignIn("onedrive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(third, "https://login.microsoftonline.com/") || !strings.Contains(third, "redirect_uri=http%3A%2F%2Flocalhost%3A53682%2F") {
+		t.Fatalf("not Microsoft's sign-in for the loopback redirect: %s", third)
 	}
 }

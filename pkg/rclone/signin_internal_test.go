@@ -3,6 +3,7 @@ package rclone
 import (
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -77,12 +78,52 @@ func TestSignInGivesTheProvidersAddressAndThenTheToken(t *testing.T) {
 	}
 
 	// what the person pastes is the page that failed to load, whole
-	token, err := CompleteSignIn("http://127.0.0.1:53682/?state=abc123&code=4%2FXYZ&scope=drive")
+	token, parameters, err := CompleteSignIn("http://127.0.0.1:53682/?state=abc123&code=4%2FXYZ&scope=drive")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if token != `{"access_token":"4/XYZ"}` {
 		t.Fatalf("token: %s", token)
+	}
+	if parameters != nil {
+		t.Fatalf("drive needs nothing besides the token, got %v", parameters)
+	}
+}
+
+func TestSignInToOneDriveAlsoGivesItsDrive(t *testing.T) {
+	fakeRclone(t, "ok")
+	graph := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// the fake rclone's access token is the code that was pasted
+		if r.URL.Path != "/me/drive" || r.Header.Get("Authorization") != "Bearer M.C507" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"b!8f3a","driveType":"business","owner":{}}`))
+	}))
+	defer graph.Close()
+	previous := graphURL
+	graphURL = graph.URL
+	defer func() { graphURL = previous }()
+
+	if _, err := SignIn("onedrive"); err != nil {
+		t.Fatal(err)
+	}
+	// OneDrive redirects to localhost, not 127.0.0.1: only the query matters
+	token, parameters, err := CompleteSignIn("http://localhost:53682/?code=M.C507&state=abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != `{"access_token":"M.C507"}` || parameters["drive_id"] != "b!8f3a" || parameters["drive_type"] != "business" || len(parameters) != 2 {
+		t.Fatalf("token %s, parameters %v", token, parameters)
+	}
+
+	// a token Microsoft refuses is reported, not saved without its drive
+	if _, err := SignIn("onedrive"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := CompleteSignIn("code=other&state=abc123"); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("want Microsoft's refusal, got %v", err)
 	}
 }
 
@@ -92,7 +133,7 @@ func TestSignInAcceptsOnlyTheQueryToo(t *testing.T) {
 	if _, err := SignIn("dropbox"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CompleteSignIn("state=abc123&code=c"); err != nil {
+	if _, _, err := CompleteSignIn("state=abc123&code=c"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -109,16 +150,13 @@ func TestSignInRefusesWhatIsNotFromThisSignIn(t *testing.T) {
 		"http://127.0.0.1:53682/?state=abc123&error=access_denied": "refused",
 		"": "no code",
 	} {
-		if _, err := CompleteSignIn(pasted); err == nil || !strings.Contains(err.Error(), want) {
+		if _, _, err := CompleteSignIn(pasted); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: want an error about %q, got %v", pasted, want, err)
 		}
 	}
 }
 
-func TestSignInIsOnlyOfferedForBackendsThatHandOverAWholeToken(t *testing.T) {
-	if _, err := SignIn("onedrive"); err == nil {
-		t.Fatal("onedrive needs a drive_id too: it must keep the manual steps")
-	}
+func TestSignInIsOnlyOfferedForCloudDrives(t *testing.T) {
 	if _, err := SignIn("sftp"); err == nil {
 		t.Fatal("sftp has no sign-in")
 	}
@@ -129,7 +167,7 @@ func TestCompletingWithoutStartingSaysSo(t *testing.T) {
 	stopCurrent()
 	currentMu.Unlock()
 
-	if _, err := CompleteSignIn("state=a&code=b"); err != ErrNoSignIn {
+	if _, _, err := CompleteSignIn("state=a&code=b"); err != ErrNoSignIn {
 		t.Fatalf("want ErrNoSignIn, got %v", err)
 	}
 }

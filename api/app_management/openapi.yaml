@@ -3758,7 +3758,7 @@ components:
         backend:
           type: string
           description: An rclone backend that signs in through a browser.
-          enum: [drive, dropbox]
+          enum: [drive, dropbox, onedrive]
           example: "drive"
 
     BackupSignInLink:
@@ -3782,6 +3782,13 @@ components:
         token:
           type: string
           description: The token to put in the destination's `token` option.
+        parameters:
+          type: object
+          additionalProperties:
+            type: string
+          description: |-
+            The other options the backend needs, found out once signed in: OneDrive's
+            `drive_id` and `drive_type`. Absent for the other backends.
 
     BackupDestinationSpace:
       properties:
