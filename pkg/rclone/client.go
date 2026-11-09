@@ -23,6 +23,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -209,6 +210,13 @@ func rawRemote(name, root string) string {
 }
 
 func (c *Client) createRemote(name, backend string, parameters map[string]string) error {
+	// Without a token these backends cannot be configured on a box with no browser:
+	// rclone starts its own sign-in and waits for one until the call times out, which
+	// reads as a dead daemon. Say what is missing instead.
+	if parameters["token"] == "" && slices.Contains(signInBackends, backend) {
+		return BadSignIn("sign in first: a " + backend + " destination needs the token the sign-in gives")
+	}
+
 	// A backend that signs in through a browser (onedrive, drive, dropbox) is given
 	// the token rclone authorize printed elsewhere. Asked to refresh it, which is
 	// its default, rclone starts its own sign-in and waits for a browser this box

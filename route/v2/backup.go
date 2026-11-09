@@ -75,7 +75,7 @@ func (a *AppManagement) SetBackupDestination(ctx echo.Context, name codegen.Back
 		err = rclone.NewClient().CreateDestination(string(name), spec.Backend, root, parameters)
 	}
 	if err != nil {
-		return backupError(ctx, err)
+		return signInError(ctx, err)
 	}
 
 	return ctx.JSON(http.StatusOK, codegen.BaseResponse{

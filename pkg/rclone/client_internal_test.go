@@ -105,7 +105,11 @@ func TestADestinationGivenATokenIsNotSignedInAgain(t *testing.T) {
 		{"token": `{"access_token":"x"}`, "config_refresh_token": "true"},
 		{"host": "nas.local"},
 	} {
-		if err := client.CreateDestination("offsite", "onedrive", "", parameters); err != nil {
+		backend := "onedrive"
+		if parameters["token"] == "" {
+			backend = "sftp"
+		}
+		if err := client.CreateDestination("offsite", backend, "", parameters); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -128,6 +132,22 @@ func TestADestinationGivenATokenIsNotSignedInAgain(t *testing.T) {
 	}
 	if _, set := sent(2)["config_refresh_token"]; set {
 		t.Fatal("a backend without a token is left alone")
+	}
+}
+
+func TestADriveWithoutATokenIsRefusedBeforeRcloneWaitsForABrowser(t *testing.T) {
+	client, seen := serverFor(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{}`)) })
+
+	for _, backend := range []string{"onedrive", "drive", "dropbox"} {
+		err := client.CreateDestination("offsite", backend, "Backup", map[string]string{"drive_id": "x"})
+
+		var bad BadSignIn
+		if !errors.As(err, &bad) || !strings.Contains(err.Error(), "sign in first") {
+			t.Errorf("%s: want a sign-in mistake, got %v", backend, err)
+		}
+	}
+	if len(*seen) != 0 {
+		t.Fatal("none of them should have reached the daemon")
 	}
 }
 
