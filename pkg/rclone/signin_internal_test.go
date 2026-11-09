@@ -156,6 +156,31 @@ func TestSignInRefusesWhatIsNotFromThisSignIn(t *testing.T) {
 	}
 }
 
+// A tunnel to the box lets the browser reach rclone itself: rclone takes the code,
+// prints the token and exits, and nothing listens when the address is pasted.
+func TestSignInGivesTheTokenRcloneAlreadyPrinted(t *testing.T) {
+	s := &signIn{backend: "dropbox", state: "abc123", cancel: func() {}, exited: make(chan struct{}), token: make(chan string, 1)}
+	close(s.exited)
+	s.token <- `{"access_token":"already"}`
+	currentMu.Lock()
+	current = s
+	currentMu.Unlock()
+	t.Cleanup(func() {
+		currentMu.Lock()
+		current = nil
+		currentMu.Unlock()
+	})
+
+	if _, _, err := CompleteSignIn("http://127.0.0.1:53682/?state=other&code=c"); err == nil || !strings.Contains(err.Error(), "another sign-in") {
+		t.Fatalf("an address from another sign-in is still refused, got %v", err)
+	}
+
+	token, _, err := CompleteSignIn("http://127.0.0.1:53682/?state=abc123&code=c")
+	if err != nil || token != `{"access_token":"already"}` {
+		t.Fatalf("want the token rclone printed, got %q, %v", token, err)
+	}
+}
+
 func TestSignInIsOnlyOfferedForCloudDrives(t *testing.T) {
 	if _, err := SignIn("sftp"); err == nil {
 		t.Fatal("sftp has no sign-in")

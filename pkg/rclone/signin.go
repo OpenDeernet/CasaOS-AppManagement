@@ -159,6 +159,15 @@ func CompleteSignIn(redirected string) (string, map[string]string, error) {
 		return "", nil, err
 	}
 
+	// The browser may have reached rclone itself -- through a tunnel to the box, say --
+	// so rclone took the code, printed the token and left: nothing listens any more,
+	// but the token is here. The address was still checked above to be this sign-in's.
+	select {
+	case token := <-s.token:
+		return s.result(token)
+	default:
+	}
+
 	// Only the query is replayed, onto the address rclone listens on: what was
 	// pasted never decides where this box connects.
 	response, err := http.Get("http://" + signInAddr + "/?" + query) //nolint:gosec,noctx // fixed loopback address
@@ -169,20 +178,26 @@ func CompleteSignIn(redirected string) (string, map[string]string, error) {
 
 	select {
 	case token := <-s.token:
-		if s.backend != "onedrive" {
-			return token, nil, nil
-		}
-		parameters, err := oneDrive(token)
-		if err != nil {
-			return "", nil, err
-		}
-
-		return token, parameters, nil
+		return s.result(token)
 	case <-s.exited:
 		return "", nil, s.failure("rclone stopped before it gave a token")
 	case <-time.After(signInFinish):
 		return "", nil, errors.New("rclone did not give a token: start the sign-in again")
 	}
+}
+
+// result is what the sign-in gives for the token rclone printed: the token, and for
+// OneDrive the drive it needs with it.
+func (s *signIn) result(token string) (string, map[string]string, error) {
+	if s.backend != "onedrive" {
+		return token, nil, nil
+	}
+	parameters, err := oneDrive(token)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return token, parameters, nil
 }
 
 // oneDrive asks Microsoft which drive the account signed in to has -- what rclone
