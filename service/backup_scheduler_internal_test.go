@@ -287,3 +287,27 @@ func TestScheduledRunsRecordTheirOwnStart(t *testing.T) {
 		}
 	}
 }
+
+// An app uninstalled kept its schedules, and failed every night after: "`big-bear-dozzle` is
+// scheduled for backup but is not installed any more". Its backups stay where they went.
+func TestUninstallingAnAppForgetsItsSchedules(t *testing.T) {
+	schedulerInTempDir(t)
+
+	dozzle, other := daily(time.Time{}), daily(time.Time{})
+	dozzle.App, other.App = "big-bear-dozzle", "jellyfin"
+	elsewhere := dozzle
+	elsewhere.Destination = "nas"
+	_ = SaveBackupSchedules([]BackupSchedule{dozzle, other, elsewhere})
+
+	if err := forgetBackupSchedules("big-bear-dozzle"); err != nil {
+		t.Fatal(err)
+	}
+
+	schedules, _ := BackupSchedules()
+	if len(schedules) != 1 || schedules[0].App != "jellyfin" {
+		t.Fatalf("only the other app is still scheduled: %+v", schedules)
+	}
+	if err := forgetBackupSchedules("never-scheduled"); err != nil {
+		t.Fatalf("an app with no schedule is nothing to forget: %v", err)
+	}
+}

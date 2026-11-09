@@ -77,8 +77,12 @@ func RunBackup(ctx context.Context, app *ComposeApp, docker backupDocker, copier
 	defer markInProgress(app.Name, "backup")()
 
 	ctx = backupEventContext(ctx, app, opts.Destination, opts.Stamp, "backup")
+	// listed before anything is held still, so a backup waiting for its app can be stopped too
+	ctx, endLive := beginLive(ctx, app.Name, opts.Destination, opts.Stamp)
+	defer endLive()
 	publishBackupBegin(ctx)
 	manifest, err := runBackup(ctx, app, docker, copier, opts)
+	err = stoppedFromInterface(ctx, err)
 	if err != nil {
 		publishBackupError(ctx, err)
 		return manifest, err
@@ -165,6 +169,7 @@ func runBackup(ctx context.Context, app *ComposeApp, docker backupDocker, copier
 // box's own.
 func copyPlan(ctx context.Context, manifest *BackupManifest, copier BackupCopier, destinationName, root string) error {
 	for i, operation := range manifest.Operations {
+		liveOperation(ctx, i+1, len(manifest.Operations), operation.Source)
 		publishBackupProgress(ctx, i, len(manifest.Operations)+1, operation.Destination)
 		destination := path.Join(root, operation.Destination)
 

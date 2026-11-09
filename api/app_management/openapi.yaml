@@ -988,6 +988,48 @@ paths:
         "500":
           $ref: "#/components/responses/ResponseInternalServerError"
 
+  /backup/running:
+    get:
+      summary: The backups that run now, and the scheduler's pass
+      description: |
+        Every backup running on this box, with how far its engine says the operation under
+        way has got, and the last pass of the scheduler and the last forced chain with what
+        each did, does and will do. Empty lists when nothing runs and nothing ran since the
+        service started. A field that is not known is left out.
+      operationId: backupRunning
+      tags:
+        - Backup methods
+      responses:
+        "200":
+          $ref: "#/components/responses/BackupRunningOK"
+
+  /backup/running/{backup_id}/stop:
+    post:
+      summary: Stop one backup that runs
+      description: |
+        Stops that backup alone; a pass goes on with the next app. What was copied stays at
+        the destination, and the run is recorded as stopped from the interface.
+      operationId: stopRunningBackup
+      tags:
+        - Backup methods
+      parameters:
+        - in: path
+          name: backup_id
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      responses:
+        "202":
+          description: The stop was asked for
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BaseResponse"
+        "404":
+          $ref: "#/components/responses/ResponseNotFound"
+
   /backup/verifications/{verification_id}/cancel:
     post:
       summary: Request cancellation of a running data verification
@@ -2696,6 +2738,24 @@ components:
           example:
             message: "Internal Server Error"
 
+    BackupRunningOK:
+      description: OK
+      content:
+        application/json:
+          schema:
+            required:
+              - backups
+              - passes
+            properties:
+              backups:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LiveBackup"
+              passes:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BackupPass"
+
     ResponseNotFound:
       description: Not Found
       content:
@@ -3372,6 +3432,107 @@ components:
                     $ref: "#/components/schemas/LogsSettings"
 
   schemas:
+    LiveBackup:
+      required: [id, app, destination, stamp, origin, started_at, operation, operations, source]
+      properties:
+        id:
+          type: string
+          example: b7
+        app:
+          type: string
+          example: happy_rik
+        destination:
+          type: string
+          example: GDrive
+        stamp:
+          type: string
+          example: 2026-11-08T16-55-18Z
+        origin:
+          description: Why it runs, `scheduled`, `forced` or `on_demand`. Not an enum, as `AppOperation.kind`.
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        operation:
+          description: The operation under way, counted from 1.
+          type: integer
+        operations:
+          type: integer
+        source:
+          type: string
+          example: /DATA/AppData/overseerr/config
+        stats:
+          $ref: "#/components/schemas/LiveBackupStats"
+
+    LiveBackupStats:
+      description: The engine's counters for the operation under way. A total left out is still being taken stock of.
+      required: [bytes, files, updated_at]
+      properties:
+        bytes:
+          type: integer
+          format: int64
+        total_bytes:
+          type: integer
+          format: int64
+        files:
+          type: integer
+          format: int64
+        total_files:
+          type: integer
+          format: int64
+        speed:
+          description: Bytes a second.
+          type: integer
+          format: int64
+        eta:
+          description: Seconds left.
+          type: integer
+          format: int64
+        current:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+
+    BackupPass:
+      required: [origin, started_at, items]
+      properties:
+        origin:
+          description: "`scheduled` or `forced`."
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupPassItem"
+
+    BackupPassItem:
+      required: [app, destination, state]
+      properties:
+        app:
+          type: string
+        destination:
+          type: string
+        state:
+          description: "`waiting`, `running`, `done`, `failed`, `stopped`, or `held` while an operating system upgrade is open."
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        bytes:
+          type: integer
+          format: int64
+        error:
+          type: string
+
     BaseResponse:
       properties:
         message:

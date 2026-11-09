@@ -3,11 +3,15 @@ package restic
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/ReCasaOS/CasaOS-AppManagement/pkg/backupprogress"
 )
 
 type call struct {
@@ -19,6 +23,17 @@ type call struct {
 type fake struct {
 	calls   []call
 	replies map[string]func() ([]byte, error)
+	// lines is what a streamed command prints, one line each
+	lines []string
+}
+
+func (f *fake) stream(_ context.Context, env []string, line func([]byte), args ...string) error {
+	f.calls = append(f.calls, call{env: env, args: args})
+	for _, l := range f.lines {
+		line([]byte(l))
+	}
+
+	return nil
 }
 
 func (f *fake) run(_ context.Context, env []string, args ...string) ([]byte, error) {
@@ -38,7 +53,7 @@ func engineWith(t *testing.T, f *fake) *Engine {
 	t.Helper()
 	KeyDir = t.TempDir()
 
-	return &Engine{run: f.run, repository: func(d string) string { return "repo-of-" + d }}
+	return &Engine{run: f.run, stream: f.stream, repository: func(d string) string { return "repo-of-" + d }}
 }
 
 func reply(out string, err error) func() ([]byte, error) {
@@ -340,5 +355,97 @@ func TestACheckThatFindsAFaultSaysWhatResticSaid(t *testing.T) {
 	var exit *ExitError
 	if !errors.As(err, &exit) || !strings.Contains(exit.Message, "pack 1a2b") {
 		t.Fatalf("the fault must reach the person: %v", err)
+	}
+}
+
+func TestABackupWithAReporterStreamsJSON(t *testing.T) {
+	status := `{"message_type":"status","seconds_elapsed":10,"seconds_remaining":56,"total_files":4,"files_done":1,"total_bytes":100,"bytes_done":25}`
+	f := &fake{lines: []string{status, strings.Repeat("x", 100*1024), status}}
+	e := engineWith(t, f)
+
+	var got []backupprogress.Stats
+	ctx := backupprogress.With(context.Background(), func(stats backupprogress.Stats) { got = append(got, stats) })
+	if err := e.CopyDirectory(ctx, "/vol/data", "nas", "blog/20261001/volume-data"); err != nil {
+		t.Fatal(err)
+	}
+
+	args := f.calls[len(f.calls)-1].args
+	if !contains(args, "--json") || contains(args, "--quiet") || !contains(args, "backup") {
+		t.Fatalf("a followed backup speaks JSON and is not quiet: %v", args)
+	}
+	if !contains(args, "--retry-lock") {
+		t.Fatalf("the lock wait is kept: %v", args)
+	}
+	if len(got) != 2 || got[0].Bytes != 25 || got[0].TotalBytes != 100 {
+		t.Fatalf("stats: %+v", got)
+	}
+}
+
+func TestABackupWithoutAReporterIsUnchanged(t *testing.T) {
+	f := &fake{}
+	e := engineWith(t, f)
+
+	if err := e.CopyDirectory(context.Background(), "/vol/data", "nas", "blog/20261001/volume-data"); err != nil {
+		t.Fatal(err)
+	}
+
+	args := f.calls[len(f.calls)-1].args
+	if args[2] != "--quiet" || contains(args, "--json") {
+		t.Fatalf("an unfollowed backup runs as before: %v", args)
+	}
+}
+
+// A backup killed half way, as Stop does, must not lock the repository for the next one.
+func TestAKilledBackupDoesNotLockTheNext(t *testing.T) {
+	if !Available() {
+		t.Skip("restic is not installed")
+	}
+	KeyDir = t.TempDir()
+	CacheDir = t.TempDir()
+	repository := t.TempDir()
+	e := &Engine{run: execRunner, stream: execStreamer, repository: func(string) string { return repository }}
+	if _, err := e.Enable(context.Background(), "local", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// enough data that the first backup is still running when it is killed
+	source := t.TempDir()
+	chunk := make([]byte, 1<<20)
+	for i := range 300 {
+		for j := range chunk {
+			chunk[j] = byte(i*7 + j*13)
+		}
+		if err := os.WriteFile(filepath.Join(source, fmt.Sprintf("f%03d", i)), chunk, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(backupprogress.With(context.Background(), func(backupprogress.Stats) {}), 500*time.Millisecond)
+	defer cancel()
+	_ = e.CopyDirectory(ctx, source, "local", "blog/20261001/volume-data")
+
+	done := make(chan error, 1)
+	go func() { done <- e.CopyDirectory(context.Background(), source, "local", "blog/20261002/volume-data") }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the next backup failed: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the next backup waited on the lock of the killed one")
+	}
+}
+
+// Left alone, restic prints some fifty statuses a second for hours; one is plenty.
+func TestAFollowedBackupAsksForOneStatusASecond(t *testing.T) {
+	f := &fake{}
+	e := engineWith(t, f)
+
+	ctx := backupprogress.With(context.Background(), func(backupprogress.Stats) {})
+	if err := e.CopyDirectory(ctx, "/vol/data", "nas", "blog/20261001/volume-data"); err != nil {
+		t.Fatal(err)
+	}
+	if !contains(f.calls[len(f.calls)-1].env, "RESTIC_PROGRESS_FPS=1") {
+		t.Fatalf("env: %v", f.calls[len(f.calls)-1].env)
 	}
 }

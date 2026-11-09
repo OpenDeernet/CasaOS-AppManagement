@@ -55,6 +55,15 @@ func publishBackupProgress(ctx context.Context, done, total int, current string)
 	})
 }
 
+// publishBackupFraction says how far the whole run has got, between 0 and 1, while an operation
+// copies: the engines' counters make it move inside one folder, not only between two.
+func publishBackupFraction(ctx context.Context, fraction float64, current string) {
+	PublishEventWrapper(ctx, common.EventTypeBackupProgress, map[string]string{
+		common.PropertyTypeAppProgress.Name: fmt.Sprintf("%d", int(fraction*100)),
+		common.PropertyTypeMessage.Name:     current,
+	})
+}
+
 func publishBackupEnd(ctx context.Context) {
 	PublishEventWrapper(ctx, common.EventTypeBackupEnd, nil)
 }

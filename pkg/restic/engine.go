@@ -36,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ReCasaOS/CasaOS-AppManagement/pkg/backupprogress"
 	"github.com/ReCasaOS/CasaOS-AppManagement/pkg/rclone"
 )
 
@@ -130,12 +131,13 @@ func execRunner(ctx context.Context, env []string, args ...string) ([]byte, erro
 // Engine keeps backups in restic repositories.
 type Engine struct {
 	run        runner
+	stream     streamer
 	repository func(destination string) string
 }
 
 // New returns the engine that drives the restic binary on this box.
 func New() *Engine {
-	return &Engine{run: execRunner, repository: func(destination string) string {
+	return &Engine{run: execRunner, stream: execStreamer, repository: func(destination string) string {
 		return "rclone:" + rclone.DestinationPrefix + destination + ":" + RepositoryFolder
 	}}
 }
@@ -226,16 +228,43 @@ func Available() bool {
 }
 
 func (e *Engine) call(ctx context.Context, destination string, args ...string) ([]byte, error) {
+	env, err := e.env(destination)
+	if err != nil {
+		return nil, err
+	}
+
+	return e.run(ctx, env, append([]string{"--retry-lock", "5m", "--quiet"}, args...)...)
+}
+
+// callFollowed is call for a command somebody follows: it speaks JSON, is not quiet, and each
+// status it prints reaches the context's progress callback.
+func (e *Engine) callFollowed(ctx context.Context, destination string, args ...string) error {
+	env, err := e.env(destination)
+	if err != nil {
+		return err
+	}
+
+	// one status a second: left alone, restic prints some fifty, for the hours a copy takes
+	env = append(env, "RESTIC_PROGRESS_FPS=1")
+
+	return e.stream(ctx, env, func(line []byte) {
+		if stats, ok := parseStatus(line); ok {
+			backupprogress.Report(ctx, stats)
+		}
+	}, append([]string{"--retry-lock", "5m", "--json"}, args...)...)
+}
+
+func (e *Engine) env(destination string) ([]string, error) {
 	key, err := keyPath(destination)
 	if err != nil {
 		return nil, err
 	}
 
-	return e.run(ctx, []string{
+	return []string{
 		"RESTIC_REPOSITORY=" + e.repository(destination),
 		"RESTIC_PASSWORD_FILE=" + key,
 		"RESTIC_CACHE_DIR=" + CacheDir,
-	}, append([]string{"--retry-lock", "5m", "--quiet"}, args...)...)
+	}, nil
 }
 
 // Enable makes a destination a restic repository and returns the password that
@@ -424,9 +453,14 @@ func (e *Engine) backup(ctx context.Context, source, destination, remotePath str
 		return err
 	}
 
-	_, err = e.call(ctx, destination, "backup",
-		"--tag", tagOwner, "--tag", "app="+escape(app), "--tag", "stamp="+escape(stamp), "--tag", "key="+escape(remotePath),
-		source)
+	args := []string{"backup",
+		"--tag", tagOwner, "--tag", "app=" + escape(app), "--tag", "stamp=" + escape(stamp), "--tag", "key=" + escape(remotePath),
+		source}
+	if backupprogress.Wanted(ctx) {
+		return e.callFollowed(ctx, destination, args...)
+	}
+
+	_, err = e.call(ctx, destination, args...)
 
 	return err
 }

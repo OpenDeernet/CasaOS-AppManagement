@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ReCasaOS/CasaOS-AppManagement/pkg/backupprogress"
 )
 
 // Nothing here should wait two seconds to find out a job finished.
@@ -236,5 +238,118 @@ func TestJobStatusCarriesTheEndpointOutput(t *testing.T) {
 	status, err := client.JobStatus(4)
 	if err != nil || string(status.Output) != `{"success":false}` {
 		t.Fatalf("output lost: %q %v", status.Output, err)
+	}
+}
+
+func TestAJobWithAReporterReportsItsStatsWhileItRuns(t *testing.T) {
+	fastPolling(t)
+
+	var polls int32
+	var groups []string
+	client, _ := serverFor(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sync/copy":
+			_, _ = w.Write([]byte(`{"jobid": 7}`))
+		case "/job/status":
+			if atomic.AddInt32(&polls, 1) < 3 {
+				_, _ = w.Write([]byte(`{"id":7,"finished":false}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"id":7,"finished":true,"success":true}`))
+		case "/core/stats":
+			groups = append(groups, r.PostForm.Get("group"))
+			_, _ = w.Write([]byte(`{"bytes":1182844747,"totalBytes":1926565931,"transfers":9812,"totalTransfers":25488,` +
+				`"speed":219371.14,"eta":3390,"transferring":[{"name":"cache/a.jpg"}]}`))
+		}
+	})
+
+	var got []backupprogress.Stats
+	ctx := backupprogress.With(context.Background(), func(stats backupprogress.Stats) { got = append(got, stats) })
+	if err := client.CopyDirectory(ctx, "/DATA/AppData/overseerr/config", "GDrive", "happy_rik/run/binds/1"); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got) == 0 {
+		t.Fatal("no stats reported")
+	}
+	for _, group := range groups {
+		if group != "job/7" {
+			t.Fatalf("stats asked for group %q", group)
+		}
+	}
+	stats := got[0]
+	if stats.Bytes != 1182844747 || stats.TotalBytes != 1926565931 || stats.Files != 9812 || stats.TotalFiles != 25488 ||
+		stats.Speed != 219371 || stats.ETA == nil || *stats.ETA != 3390 || stats.Current != "cache/a.jpg" {
+		t.Fatalf("stats: %+v", stats)
+	}
+}
+
+func TestStatsThatFailDoNotStopTheCopy(t *testing.T) {
+	fastPolling(t)
+
+	var polls, asked int32
+	client, _ := serverFor(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sync/copy":
+			_, _ = w.Write([]byte(`{"jobid": 8}`))
+		case "/job/status":
+			if atomic.AddInt32(&polls, 1) < 4 {
+				_, _ = w.Write([]byte(`{"id":8,"finished":false}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"id":8,"finished":true,"success":true}`))
+		case "/core/stats":
+			switch atomic.AddInt32(&asked, 1) {
+			case 1:
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"boom"}`))
+			case 2:
+				_, _ = w.Write([]byte(`{}`))
+			default:
+				_, _ = w.Write([]byte(`{"eta":null}`))
+			}
+		}
+	})
+
+	var got []backupprogress.Stats
+	ctx := backupprogress.With(context.Background(), func(stats backupprogress.Stats) { got = append(got, stats) })
+	if err := client.CopyDirectory(ctx, "/DATA/Media", "offsite", "x"); err != nil {
+		t.Fatalf("the copy must not fail on its stats: %v", err)
+	}
+	if atomic.LoadInt32(&asked) < 3 {
+		t.Fatalf("stats asked %d times", asked)
+	}
+	for _, stats := range got {
+		if stats.ETA != nil {
+			t.Fatalf("a null eta is unknown: %+v", stats)
+		}
+	}
+}
+
+func TestNoStatsAreAskedWithoutAReporter(t *testing.T) {
+	fastPolling(t)
+
+	var polls, asked int32
+	client, _ := serverFor(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sync/copy":
+			_, _ = w.Write([]byte(`{"jobid": 9}`))
+		case "/job/status":
+			if atomic.AddInt32(&polls, 1) < 3 {
+				_, _ = w.Write([]byte(`{"id":9,"finished":false}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"id":9,"finished":true,"success":true}`))
+		case "/core/stats":
+			atomic.AddInt32(&asked, 1)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	})
+
+	if err := client.CopyDirectory(context.Background(), "/DATA/Media", "offsite", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if atomic.LoadInt32(&asked) != 0 {
+		t.Fatalf("stats asked %d times with nobody following", asked)
 	}
 }

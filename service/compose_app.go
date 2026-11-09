@@ -1176,6 +1176,11 @@ func (a *ComposeApp) Uninstall(ctx context.Context, deleteConfigFolder bool) err
 
 	a.removeUninstalledFolders(ctx, deleteConfigFolder)
 
+	// a schedule of an app that is gone fails every night; its backups stay where they went
+	if err := forgetBackupSchedules(a.Name); err != nil {
+		logger.Error("the app is uninstalled but its backup schedules could not be removed", zap.Error(err), zap.String("app", a.Name))
+	}
+
 	return nil
 }
 

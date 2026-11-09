@@ -152,11 +152,14 @@ func ForceSchedules(ctx context.Context, request ForceRequest, runner backupRunn
 	}
 
 	started := result.Started
-	ctx = context.WithoutCancel(ctx)
+	ctx = WithBackupOrigin(context.WithoutCancel(ctx), OriginForced)
+
+	pass := startPass(OriginForced, started, backupClock())
 
 	forcedRuns.Add(1)
 	go func() {
 		defer forcedRuns.Done()
+		defer func() { pass.end(backupClock()) }()
 
 		for i, schedule := range started {
 			// a chain can last hours, and an upgrade can open between two of its backups
@@ -166,11 +169,13 @@ func ForceSchedules(ctx context.Context, request ForceRequest, runner backupRunn
 				}
 				logHeldForUpgrade("forced backups were dropped: an operating system upgrade is open, or whether one is cannot be told",
 					zap.Int("dropped", len(started)-i), zap.Error(err))
+				pass.hold(i)
 
 				return
 			}
 
-			runScheduled(ctx, now, schedule, runner)
+			pass.running(i, backupClock())
+			pass.finished(i, runScheduled(ctx, now, schedule, runner))
 			release(schedule, marks[i])
 		}
 	}()

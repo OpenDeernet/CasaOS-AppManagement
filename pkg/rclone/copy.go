@@ -8,6 +8,8 @@ import (
 	"path"
 	"strconv"
 	"time"
+
+	"github.com/ReCasaOS/CasaOS-AppManagement/pkg/backupprogress"
 )
 
 // Copying, which the daemon does as a job rather than inside the call.
@@ -90,6 +92,13 @@ func (c *Client) waitForJob(ctx context.Context, id int64) error {
 			return fmt.Errorf("rclone job %d failed without saying why", id)
 		}
 
+		// only when somebody follows the copy; a figure that cannot be read costs the copy nothing
+		if backupprogress.Wanted(ctx) {
+			if stats, err := c.jobStats(ctx, id); err == nil {
+				backupprogress.Report(ctx, stats)
+			}
+		}
+
 		select {
 		case <-ctx.Done():
 			if stopErr := c.StopJob(id); stopErr != nil {
@@ -100,6 +109,40 @@ func (c *Client) waitForJob(ctx context.Context, id int64) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// jobStats is how far one job has got: the daemon's counters for that job's group alone, so
+// a second copy running beside it is not added in.
+func (c *Client) jobStats(ctx context.Context, id int64) (backupprogress.Stats, error) {
+	var answer struct {
+		Bytes          int64    `json:"bytes"`
+		TotalBytes     int64    `json:"totalBytes"`
+		Transfers      int64    `json:"transfers"`
+		TotalTransfers int64    `json:"totalTransfers"`
+		Speed          float64  `json:"speed"`
+		ETA            *float64 `json:"eta"`
+		Transferring   []struct {
+			Name string `json:"name"`
+		} `json:"transferring"`
+	}
+	if err := c.callContext(ctx, "/core/stats", map[string]string{"group": "job/" + strconv.FormatInt(id, 10)}, &answer); err != nil {
+		return backupprogress.Stats{}, err
+	}
+
+	stats := backupprogress.Stats{
+		Bytes: answer.Bytes, TotalBytes: answer.TotalBytes,
+		Files: answer.Transfers, TotalFiles: answer.TotalTransfers,
+		Speed: int64(answer.Speed),
+	}
+	if answer.ETA != nil {
+		eta := int64(*answer.ETA)
+		stats.ETA = &eta
+	}
+	if len(answer.Transferring) > 0 {
+		stats.Current = answer.Transferring[0].Name
+	}
+
+	return stats, nil
 }
 
 // Destination turns a destination name and a path inside it into the `remote:path`

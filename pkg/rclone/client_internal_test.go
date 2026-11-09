@@ -3,6 +3,7 @@ package rclone
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -20,7 +21,9 @@ func serverFor(t *testing.T, handler http.HandlerFunc) (*Client, *[]*http.Reques
 
 	seen := &[]*http.Request{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
+		// a client whose deadline passes mid-request leaves a cut body: that is the client
+		// giving up, which several tests provoke on purpose, not a malformed call
+		if err := r.ParseForm(); err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
 			t.Errorf("bad form: %v", err)
 		}
 		*seen = append(*seen, r)

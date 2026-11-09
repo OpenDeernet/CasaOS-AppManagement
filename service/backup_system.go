@@ -124,6 +124,8 @@ func RunSystemBackup(ctx context.Context, copier BackupCopier, units unitControl
 	defer markInProgress(SystemBackupName, "backup")()
 
 	ctx = backupEventContext(ctx, &ComposeApp{Name: SystemBackupName}, opts.Destination, opts.Stamp, "backup")
+	ctx, endLive := beginLive(ctx, SystemBackupName, opts.Destination, opts.Stamp)
+	defer endLive()
 	publishBackupBegin(ctx)
 
 	manifest := PlanSystemBackup(pathExists)
@@ -140,6 +142,7 @@ func RunSystemBackup(ctx context.Context, copier BackupCopier, units unitControl
 
 		return copyPlan(ctx, &manifest, copier, opts.Destination, RootFor(SystemBackupName, opts.Stamp))
 	}()
+	err = stoppedFromInterface(ctx, err)
 	if err != nil {
 		publishBackupError(ctx, err)
 		return manifest, err
