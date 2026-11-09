@@ -96,6 +96,8 @@ func TestOnlyAGitWebhookIsServedWithoutAToken(t *testing.T) {
 		{http.MethodPut, "/v2/app_management/git/no-such-app", "application/json", `{"webhook_enabled":true}`, http.StatusUnauthorized, ""},
 		{http.MethodPost, "/v2/app_management/git", "application/json", `{"name":"jarvis","url":"https://example.invalid/r.git","access":"none"}`, http.StatusUnauthorized, ""},
 		{http.MethodGet, "/v2/app_management/web/appgrid", "", "", http.StatusUnauthorized, ""},
+		// it makes this machine ask a URL, so it is never for anyone without a token
+		{http.MethodGet, "/v2/app_management/web/frame-check?url=http://127.0.0.1&origin=http://127.0.0.1", "", "", http.StatusUnauthorized, ""},
 	} {
 		request := httptest.NewRequest(call.method, call.path, strings.NewReader(call.body))
 		// from another machine, as a forge calls: the internal secret's exemption does not apply

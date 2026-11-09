@@ -1954,6 +1954,43 @@ paths:
         "500":
           $ref: "#/components/responses/ResponseInternalServerError"
 
+  /web/frame-check:
+    get:
+      summary: Whether an app's web interface can be shown inside the dashboard
+      description: |
+        Asks the app's URL the way a browser framing it would, and answers whether the browser
+        will render it in a frame on `origin`. A browser blocks such a frame without telling
+        the page that holds it (an empty frame and nothing to catch), so only something outside
+        the browser can find out.
+
+        `embeddable` is `false` with a `reason` when the app forbids it (`x-frame-options`,
+        `frame-ancestors`) or serves HTTPS with a certificate this machine does not trust
+        (`untrusted-certificate`: a frame shows no warning to click through), or is plain HTTP
+        under an HTTPS dashboard (`mixed-content`). It is absent when
+        the app could not be asked, which is not an answer either way. Only the response
+        headers are read, never the body.
+      operationId: checkWebFrame
+      tags:
+        - Internal methods
+      parameters:
+        - name: url
+          in: query
+          required: true
+          description: the app's web interface, http or https
+          schema:
+            type: string
+        - name: origin
+          in: query
+          required: true
+          description: the dashboard's own origin, as `window.location.origin` gives it
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/WebFrameCheckOK"
+        "400":
+          $ref: "#/components/responses/ResponseBadRequest"
+
   # the endpoint is newer version of POST /appstore for the demand of @ETWang1991
   # the old api is dependent by CasaOS. So we can't remove it.
   # a good idea is /v3/app-management/appstore. But it is hard to implement in ZimaOS
@@ -3335,6 +3372,17 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/BaseResponse"
+
+    WebFrameCheckOK:
+      description: OK
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/BaseResponse"
+              - properties:
+                  data:
+                    $ref: "#/components/schemas/WebFrameCheck"
 
     GetWebAppGridOK:
       description: OK
@@ -5272,6 +5320,21 @@ components:
         deployed:
           type: boolean
           description: False until a deployment has succeeded.
+
+    WebFrameCheck:
+      type: object
+      properties:
+        embeddable:
+          type: boolean
+          description: absent when the app could not be asked
+        reason:
+          type: string
+          enum:
+            - x-frame-options
+            - frame-ancestors
+            - untrusted-certificate
+            - mixed-content
+          description: why it is not embeddable, set only when `embeddable` is false
 
     WebAppGridItem:
       description: (internal use ONLY)
