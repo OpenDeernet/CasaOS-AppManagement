@@ -25,6 +25,11 @@ func (a *AppManagement) Convert(ctx echo.Context, params codegen.ConvertParams) 
 			return ctx.JSON(http.StatusBadRequest, codegen.ResponseBadRequest{Message: &message})
 		}
 
+		if err := legacyFile.ValidateCustomLabels(); err != nil {
+			message := err.Error()
+			return ctx.JSON(http.StatusBadRequest, codegen.ResponseBadRequest{Message: &message})
+		}
+
 		compose := legacyFile.Compose()
 
 		yaml, err := yaml.Marshal(compose)

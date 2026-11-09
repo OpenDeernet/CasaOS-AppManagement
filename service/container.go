@@ -388,6 +388,10 @@ func (ds *dockerService) CreateContainerShellSession(containerID, row, col strin
 // param tcp 容器其他tcp端口
 // param udp 容器其他udp端口
 func (ds *dockerService) CreateContainer(m model.CustomizationPostData, id string) (containerID string, err error) {
+	if err := m.ValidateCustomLabels(); err != nil {
+		return "", err
+	}
+
 	if len(m.NetworkModel) == 0 {
 		m.NetworkModel = "bridge"
 	}
@@ -535,6 +539,19 @@ func (ds *dockerService) CreateContainer(m model.CustomizationPostData, id strin
 		config.Env = envArr
 		config.Hostname = m.HostName
 		config.ExposedPorts = ports
+	}
+
+	// the labels of the request are the user's labels: those of an earlier one go, an image's
+	// come back from the image. Set before the system's, which win.
+	if err != nil || config.Labels["casaos"] == "casaos" {
+		for key := range config.Labels {
+			if !model.IsReservedLabel(key) {
+				delete(config.Labels, key)
+			}
+		}
+		for _, label := range m.CustomLabels {
+			config.Labels[label.Name] = label.Value
+		}
 	}
 
 	config.Labels["origin"] = m.Origin

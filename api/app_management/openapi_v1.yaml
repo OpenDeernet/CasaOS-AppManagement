@@ -444,3 +444,17 @@ components:
         appstore_id:
           type: integer
           example: 1
+        custom_labels:
+          type: array
+          description: Docker labels set by the user, checked like the labels of a compose app (a name of letters, digits and `. _ - /`, none of the names the system sets, at most 50). The container's own labels the user may edit come back in the same list.
+          items:
+            type: object
+            properties:
+              container:
+                type: string
+                description: The label's name
+                example: "traefik.enable"
+              host:
+                type: string
+                description: The label's value
+                example: "true"

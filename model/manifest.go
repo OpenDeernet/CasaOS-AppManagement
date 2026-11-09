@@ -93,4 +93,6 @@ type CustomizationPostData struct {
 	Protocol    string   `json:"protocol"`
 	Host        string   `json:"host"`
 	AppStoreID  uint     `json:"appstore_id"`
+	// Docker labels set by the user; see ValidateCustomLabels for what is accepted
+	CustomLabels EnvArray `json:"custom_labels"`
 }

@@ -9,6 +9,9 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
+// Features is what GET /info says this build can do beyond the first release of the API.
+var Features = []string{"labels"}
+
 func (a *AppManagement) Info(ctx echo.Context) error {
 	architecture, err := docker.CurrentArchitecture()
 	if err != nil {
@@ -19,5 +22,6 @@ func (a *AppManagement) Info(ctx echo.Context) error {
 
 	return ctx.JSON(http.StatusOK, codegen.InfoOK{
 		Architecture: utils.Ptr(architecture),
+		Features:     utils.Ptr(Features),
 	})
 }

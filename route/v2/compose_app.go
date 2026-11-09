@@ -200,6 +200,11 @@ func (a *AppManagement) ApplyComposeAppSettings(ctx echo.Context, id codegen.Com
 		})
 	}
 
+	if err := newComposeApp.ValidateLabels(composeApp); err != nil {
+		message := err.Error()
+		return ctx.JSON(http.StatusBadRequest, codegen.ResponseBadRequest{Message: &message})
+	}
+
 	uncontrolled, err := a.IsNewComposeUncontrolled(newComposeApp)
 	if err != nil {
 		message := err.Error()
@@ -406,6 +411,11 @@ func (a *AppManagement) InstallComposeApp(ctx echo.Context, params codegen.Insta
 		return ctx.JSON(http.StatusBadRequest, codegen.ResponseBadRequest{
 			Message: &message,
 		})
+	}
+
+	if err := composeApp.ValidateLabels(composeApp.StoreVersion()); err != nil {
+		message := err.Error()
+		return ctx.JSON(http.StatusBadRequest, codegen.ResponseBadRequest{Message: &message})
 	}
 
 	uncontrolled, err := a.IsNewComposeUncontrolled(composeApp)

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"runtime"
 	"strconv"
 	"strings"
@@ -97,6 +98,26 @@ func (ea *EnvArray) ToMappingWithEquals() types.MappingWithEquals {
 	})
 }
 
+// LabelMap gives the labels as Docker takes them; nil when there are none.
+func (ea *EnvArray) LabelMap() map[string]string {
+	if len(*ea) == 0 {
+		return nil
+	}
+	return lo.SliceToMap(*ea, func(e Env) (string, string) {
+		return e.Name, e.Value
+	})
+}
+
+// ValidateCustomLabels refuses labels that are invalid, reserved, too many or named twice
+// (see labels.go).
+func (c *CustomizationPostData) ValidateCustomLabels() error {
+	labels := c.CustomLabels.LabelMap()
+	if len(labels) != len(c.CustomLabels) {
+		return fmt.Errorf("a label is named more than once")
+	}
+	return ValidateLabels(labels, nil)
+}
+
 func (ea *EnvArray) EnvStoreInfoList() []codegen.EnvStoreInfo {
 	return lo.Map(*ea, func(e Env, i int) codegen.EnvStoreInfo {
 		return codegen.EnvStoreInfo{
@@ -148,6 +169,7 @@ func (c *CustomizationPostData) Services() types.Services {
 			Devices:     c.Devices.ToSlice(),
 			Environment: c.Envs.ToMappingWithEquals(),
 			Image:       c.Image,
+			Labels:      c.CustomLabels.LabelMap(),
 			Name:        name,
 			NetworkMode: c.NetworkModel,
 			Ports:       c.Ports.ServicePortConfigList(),

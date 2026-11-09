@@ -1,6 +1,7 @@
 package v1
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 
@@ -91,6 +92,7 @@ func GetCustomizationPostData(info types.ContainerJSON) model.CustomizationPostD
 	}
 
 	m := model.CustomizationPostData{
+		CustomLabels:  customLabels(info.Config.Labels),
 		AppStoreID:    appStoreID,
 		CapAdd:        info.HostConfig.CapAdd,
 		Cmd:           info.Config.Cmd,
@@ -152,4 +154,27 @@ func AppIcon(containerInfo *types.ContainerJSON) string {
 	}
 
 	return containerInfo.Config.Labels[V1LabelIcon]
+}
+
+// customLabels are the labels of a container the user may edit: those this box sets, and those
+// it would refuse, stay out (an image's own labels are not told from the user's, they come back
+// with the image). shortcut: at most MaxLabelsPerService by name order, when an image has more
+// labels than that.
+func customLabels(labels map[string]string) model.EnvArray {
+	names := make([]string, 0, len(labels))
+	for name, value := range labels {
+		if model.ValidateLabel(name, value) == nil {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	if len(names) > model.MaxLabelsPerService {
+		names = names[:model.MaxLabelsPerService]
+	}
+
+	var custom model.EnvArray
+	for _, name := range names {
+		custom = append(custom, model.Env{Name: name, Value: labels[name]})
+	}
+	return custom
 }

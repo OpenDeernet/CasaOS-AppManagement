@@ -106,6 +106,10 @@ func InstallApp(ctx echo.Context) error {
 		return ctx.JSON(http.StatusBadRequest, modelCommon.Result{Success: common_err.INVALID_PARAMS, Message: err.Error()})
 	}
 
+	if err := m.ValidateCustomLabels(); err != nil {
+		return ctx.JSON(http.StatusBadRequest, modelCommon.Result{Success: common_err.INVALID_PARAMS, Message: err.Error()})
+	}
+
 	const CUSTOM = "custom"
 	var dockerImage string
 	var dockerImageVersion string
@@ -394,6 +398,10 @@ func UpdateSetting(ctx echo.Context) error {
 
 	m := model.CustomizationPostData{}
 	if err := ctx.Bind(&m); err != nil {
+		return ctx.JSON(http.StatusBadRequest, modelCommon.Result{Success: common_err.INVALID_PARAMS, Message: err.Error()})
+	}
+
+	if err := m.ValidateCustomLabels(); err != nil {
 		return ctx.JSON(http.StatusBadRequest, modelCommon.Result{Success: common_err.INVALID_PARAMS, Message: err.Error()})
 	}
 

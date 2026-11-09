@@ -167,6 +167,8 @@ paths:
   /convert:
     post:
       summary: Convert to compose app from another file format
+      description: |-
+        An app file's `custom_labels` become the `labels` of its service. They are checked as the labels of a compose app are (see `POST /compose`); an invalid, reserved or repeated name is refused with a `400`.
       operationId: convert
       tags:
         - Common methods
@@ -546,6 +548,7 @@ paths:
 
         > - The request has to be `content-type: application/yaml` and the body has to follow [Compose Specification](https://compose-spec.io).
         > - When `dry_run=true` is provided in the query string, it only validates the YAML content.
+        > - A label a service gains or changes is checked: a name of 1 to 128 characters (letters, digits and `. _ - /`, starting with a letter or a digit), a value of at most 2048 bytes with no control character, at most 50 labels added or changed per service, and none of the names this box or Docker Compose set (`casaos`, `origin`, `icon`, `name`, `desc`, `host`, `index`, `web`, `protocol`, `custom_id`, `show_env`, `io.casaos.*`, `com.docker.compose.*`). Labels the app already carries (its installed version, or the store's) are left alone. Anything else is refused with a `400`.
         > - A top-level `x-casaos-env` string is the app's `.env`, installed with it: it is taken out of the compose text, the compose is checked with its values (an `env_file: .env` included), and it is written as the `.env` next to the app's `docker-compose.yml`. A reference to one of its keys stays as written in the compose file, as for a `.env` added later (`PUT /compose/{id}/env`). A key CasaOS sets itself (`TZ`, `PUID`, `PGID`, `AppID`...) is refused with a `400`.
 
       operationId: installComposeApp
@@ -603,6 +606,7 @@ paths:
         > - The request has to be `content-type: application/yaml` and the body has to follow [Compose Specification](https://compose-spec.io).
         > - A reference to a key of the app's `.env` is copied as written (see `GET /compose/{id}` for the fields where it is kept). The keys are those of the `.env` on disk at that moment: a key has to be in `.env` (`PUT /compose/{id}/env`) before a compose referencing it is saved, otherwise the reference is baked as a literal.
         > - When `dry_run=true` is provided in the query string, it only validates the YAML content.
+        > - A label a service gains or changes is checked: a name of 1 to 128 characters (letters, digits and `. _ - /`, starting with a letter or a digit), a value of at most 2048 bytes with no control character, at most 50 labels added or changed per service, and none of the names this box or Docker Compose set (`casaos`, `origin`, `icon`, `name`, `desc`, `host`, `index`, `web`, `protocol`, `custom_id`, `show_env`, `io.casaos.*`, `com.docker.compose.*`). Labels the app already carries (its installed version, or the store's) are left alone. Anything else is refused with a `400`.
 
       operationId: applyComposeAppSettings
       tags:
@@ -3595,6 +3599,14 @@ components:
           type: string
           readOnly: true
           example: "amd64"
+        features:
+          description: |-
+            What this AppManagement does that an older one does not, so a client can ask instead of guessing. `labels`: the Docker labels of a service are checked on install and on saving settings, and an app file's `custom_labels` are taken.
+          type: array
+          items:
+            type: string
+          readOnly: true
+          example: ["labels"]
 
     AppOperation:
       required:
