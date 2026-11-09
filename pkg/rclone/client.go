@@ -228,7 +228,17 @@ func (c *Client) createRemote(name, backend string, parameters map[string]string
 		}
 	}
 
-	return c.createRemoteOf(name, backend, parameters, nil)
+	// OneDrive's configuration goes on to ask questions after the token -- which kind
+	// of connection, which drive, whether it is the right one -- and rclone asks them
+	// on the daemon's own terminal, which nobody reads: the call waits until it times
+	// out. What it would ask is already in parameters (the sign-in gave the drive_id
+	// and drive_type), so have it keep them and hand the question back, unanswered.
+	var extra map[string]string
+	if backend == "onedrive" {
+		extra = map[string]string{"opt": `{"nonInteractive": true}`}
+	}
+
+	return c.createRemoteOf(name, backend, parameters, extra)
 }
 
 // createRemoteOf asks rclone for the remote called name (without the prefix).

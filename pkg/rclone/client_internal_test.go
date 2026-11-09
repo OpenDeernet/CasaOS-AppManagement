@@ -135,6 +135,25 @@ func TestADestinationGivenATokenIsNotSignedInAgain(t *testing.T) {
 	}
 }
 
+// rclone's OneDrive configuration asks about the kind of connection and the drive
+// after the token, on the daemon's terminal where nobody answers: the call hangs
+// until it times out (seen on a real box). Left unanswered, rclone keeps what it was
+// given and returns the question at once.
+func TestOneDriveIsCreatedWithoutWaitingForRcloneToAskQuestions(t *testing.T) {
+	client, seen := serverFor(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{}`)) })
+	parameters := map[string]string{"token": `{"access_token":"x"}`, "drive_id": "d", "drive_type": "personal"}
+
+	for backend, want := range map[string]string{"onedrive": `{"nonInteractive": true}`, "drive": "", "sftp": ""} {
+		*seen = nil
+		if err := client.CreateDestination("offsite", backend, "", parameters); err != nil {
+			t.Fatal(err)
+		}
+		if got := (*seen)[0].PostForm.Get("opt"); got != want {
+			t.Errorf("%s: want opt %q, got %q", backend, want, got)
+		}
+	}
+}
+
 func TestADriveWithoutATokenIsRefusedBeforeRcloneWaitsForABrowser(t *testing.T) {
 	client, seen := serverFor(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{}`)) })
 
