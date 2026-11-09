@@ -76,7 +76,8 @@ func upgradeFlagIn(t *testing.T) *upgradeFlag {
 	flag := &upgradeFlag{info: info}
 	wasStat, wasLog := osUpgradeBusyStat, logHeldForUpgrade
 	osUpgradeBusyStat, logHeldForUpgrade = flag.stat, flag.log
-	t.Cleanup(func() { osUpgradeBusyStat, logHeldForUpgrade = wasStat, wasLog })
+	forgetBackupHoldNotice() // a test starts as a fresh process would: nothing said yet
+	t.Cleanup(func() { osUpgradeBusyStat, logHeldForUpgrade = wasStat, wasLog; forgetBackupHoldNotice() })
 
 	return flag
 }
@@ -295,10 +296,41 @@ func TestAHeldTickSaysOneThingNoMatterHowManyWait(t *testing.T) {
 		t.Fatalf("%v", runner.ran)
 	}
 
-	// and the next minute is another cycle
+	// and the next minute is another cycle, which does not say it again: see the test below
 	RunDueBackups(context.Background(), at(10, 7, 1), runner)
+	if len(flag.said) != 1 {
+		t.Fatalf("said once for the hour: %d", len(flag.said))
+	}
+}
+
+// A hold that lasts days said the same warning every minute, and drowned the journal. Once an
+// hour is enough to find the reason; the backups still wait every minute.
+func TestAHeldTickSaysItOncePerHour(t *testing.T) {
+	schedulerInTempDir(t)
+	flag := upgradeFlagIn(t)
+	flag.present = true
+
+	_ = SaveBackupSchedules([]BackupSchedule{daily(time.Time{})})
+
+	clock := clockAt(t, at(10, 7, 0))
+	runner := &fakeRunner{}
+
+	RunDueBackups(context.Background(), at(10, 7, 0), runner)
+	*clock = clock.Add(time.Minute)
+	RunDueBackups(context.Background(), at(10, 7, 1), runner)
+
+	if len(flag.said) != 1 {
+		t.Fatalf("two held ticks a minute apart say it once: %d", len(flag.said))
+	}
+
+	*clock = clock.Add(61 * time.Minute)
+	RunDueBackups(context.Background(), at(10, 8, 2), runner)
+
 	if len(flag.said) != 2 {
-		t.Fatalf("a line per skipped cycle: %d", len(flag.said))
+		t.Fatalf("and again an hour later: %d", len(flag.said))
+	}
+	if len(runner.ran) != 0 {
+		t.Fatalf("saying less is not running more: %v", runner.ran)
 	}
 }
 
@@ -415,4 +447,12 @@ func TestABackupIsListedAsRunningBeforeTheFlagIsLookedFor(t *testing.T) {
 			}
 		})
 	}
+}
+
+// forgetBackupHoldNotice makes the next held tick say so, as the first one after a start does.
+func forgetBackupHoldNotice() {
+	lastUpgradeHoldLogMu.Lock()
+	defer lastUpgradeHoldLogMu.Unlock()
+
+	lastUpgradeHoldLog = time.Time{}
 }

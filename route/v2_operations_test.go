@@ -40,16 +40,16 @@ func TestTheOperationsRouteListsWhatHoldsTheApps(t *testing.T) {
 
 	answer := ask("Internal s3cret")
 	assert.Equal(t, answer.Code, http.StatusOK, answer.Body.String())
-	assert.Equal(t, strings.TrimSpace(answer.Body.String()), `{"operations":[]}`)
+	assert.Equal(t, strings.TrimSpace(answer.Body.String()), `{"operations":[],"os_upgrade_open":false}`)
 
 	end, err := service.Begin("jarvis", "deploy")
 	assert.NilError(t, err)
 	answer = ask("Internal s3cret")
-	assert.Equal(t, strings.TrimSpace(answer.Body.String()), `{"operations":[{"app":"jarvis","kind":"deploy"}]}`)
+	assert.Equal(t, strings.TrimSpace(answer.Body.String()), `{"operations":[{"app":"jarvis","kind":"deploy"}],"os_upgrade_open":false}`)
 
 	end()
 	answer = ask("Internal s3cret")
-	assert.Equal(t, strings.TrimSpace(answer.Body.String()), `{"operations":[]}`)
+	assert.Equal(t, strings.TrimSpace(answer.Body.String()), `{"operations":[],"os_upgrade_open":false}`)
 
 	assert.Equal(t, ask("").Code, http.StatusUnauthorized)
 }

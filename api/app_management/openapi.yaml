@@ -797,6 +797,53 @@ paths:
         "500":
           $ref: "#/components/responses/ResponseInternalServerError"
 
+  /backup/schedules/run:
+    post:
+      summary: Run standing arrangements now
+      description: |
+        Starts the enabled schedules now, as they would run on their own, with their
+        own settings and retention. The optional body narrows them to one app, one
+        destination or one pair; with no body every enabled schedule is selected.
+        A forced run never counts as the schedule's own run: `last_run` does not move.
+        It answers as soon as the runs have started. A pair is refused, with the
+        reason, when its app has an operation in progress, when it is already
+        running, or when its schedule cannot be run.
+        202 when at least one pair starts, 409 when none does (an operating system
+        upgrade is open, or every pair was refused), 404 when no schedule matches.
+      operationId: forceBackupSchedules
+      tags:
+        - Backup methods
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                app:
+                  type: string
+                destination:
+                  type: string
+      responses:
+        "202":
+          $ref: "#/components/responses/BackupForceOK"
+        "400":
+          $ref: "#/components/responses/ResponseBadRequest"
+        "404":
+          $ref: "#/components/responses/ResponseNotFound"
+        "409":
+          description: Nothing could start
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/BaseResponse"
+                  - properties:
+                      data:
+                        $ref: "#/components/schemas/BackupForceResult"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+
   /backup/runs:
     get:
       summary: What happened, the last few hundred times a backup ran
@@ -810,6 +857,39 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/BackupRunsOK"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+
+  /backup/verification-schedule:
+    get:
+      summary: When backups are read back on their own
+      description: Off by default.
+      operationId: backupVerificationSchedule
+      tags:
+        - Backup methods
+      responses:
+        "200":
+          $ref: "#/components/responses/BackupVerificationScheduleOK"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+
+    put:
+      summary: Replace when backups are read back on their own
+      description: '`last_run` is ignored.'
+      operationId: setBackupVerificationSchedule
+      tags:
+        - Backup methods
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupVerificationSchedule"
+      responses:
+        "200":
+          $ref: "#/components/responses/ResponseOK"
+        "400":
+          $ref: "#/components/responses/ResponseBadRequest"
         "500":
           $ref: "#/components/responses/ResponseInternalServerError"
 
@@ -856,6 +936,84 @@ paths:
           $ref: "#/components/responses/BackupSignInFinishOK"
         "400":
           $ref: "#/components/responses/ResponseBadRequest"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+
+  /backup/verifications:
+    get:
+      summary: List backup data verification results
+      description: |
+        A separate history, newest first, including the currently running check.
+        Passed means the available backup was downloaded and compared with its
+        current remote contents. It does not prove historical integrity or that
+        an application can start. Interrupted checks never become passed.
+      operationId: backupVerifications
+      tags:
+        - Backup methods
+      responses:
+        "200":
+          $ref: "#/components/responses/BackupVerificationsOK"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+    post:
+      summary: Download and compare a backup in private temporary storage
+      description: |
+        Starts one asynchronous data verification, limited to 1 GiB, 100,000 files
+        and one hour; a bigger backup ends as not_verifiable. A destination kept
+        with restic is refused (400): use its repository check instead.
+        No app is started or stopped and no existing app data is replaced.
+        Only one verification runs at a time. Temporary data is removed only
+        after transfers are confirmed stopped. Existing backups have no original
+        file hashes, so this checks the copy available now, not its original state.
+      operationId: startBackupVerification
+      tags:
+        - Backup methods
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupVerificationRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/BackupVerificationOK"
+        "400":
+          $ref: "#/components/responses/ResponseBadRequest"
+        "409":
+          description: A verification is already running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BaseResponse"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+
+  /backup/verifications/{verification_id}/cancel:
+    post:
+      summary: Request cancellation of a running data verification
+      description: The result remains running until its transfers have stopped.
+      operationId: cancelBackupVerification
+      tags:
+        - Backup methods
+      parameters:
+        - in: path
+          name: verification_id
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      responses:
+        "202":
+          $ref: "#/components/responses/BackupVerificationOK"
+        "404":
+          $ref: "#/components/responses/ResponseNotFound"
+        "409":
+          description: The verification is no longer running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BaseResponse"
         "500":
           $ref: "#/components/responses/ResponseInternalServerError"
 
@@ -2588,11 +2746,15 @@ components:
           schema:
             required:
               - operations
+              - os_upgrade_open
             properties:
               operations:
                 type: array
                 items:
                   $ref: "#/components/schemas/AppOperation"
+              os_upgrade_open:
+                type: boolean
+                description: True while an operating system upgrade is open, which holds back scheduled backups.
 
     GlobalSettingOK:
       description: OK
@@ -2917,6 +3079,52 @@ components:
                     type: array
                     items:
                       $ref: "#/components/schemas/BackupHeldApp"
+
+    BackupVerificationOK:
+      description: The verification was accepted
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/BaseResponse"
+              - properties:
+                  data:
+                    $ref: "#/components/schemas/BackupVerificationRecord"
+
+    BackupVerificationsOK:
+      description: Backup verification history, newest first
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/BaseResponse"
+              - properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/BackupVerificationRecord"
+
+    BackupForceOK:
+      description: At least one run started
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/BaseResponse"
+              - properties:
+                  data:
+                    $ref: "#/components/schemas/BackupForceResult"
+
+    BackupVerificationScheduleOK:
+      description: OK
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/BaseResponse"
+              - properties:
+                  data:
+                    $ref: "#/components/schemas/BackupVerificationSchedule"
 
     BackupRunsOK:
       description: OK
@@ -3678,6 +3886,130 @@ components:
           type: string
           format: date-time
           readOnly: true
+        last_slot:
+          type: string
+          format: date-time
+          readOnly: true
+          description: The most recent slot of the schedule, with the box's UTC offset. Absent when disabled or unreadable.
+        next_slot:
+          type: string
+          format: date-time
+          readOnly: true
+          description: The slot after that one, with the box's UTC offset. Absent when disabled or unreadable.
+
+    BackupVerificationRequest:
+      type: object
+      required: [destination, app, stamp]
+      properties:
+        destination:
+          type: string
+          minLength: 1
+          maxLength: 128
+        app:
+          type: string
+          minLength: 1
+          maxLength: 128
+        stamp:
+          type: string
+          minLength: 1
+          maxLength: 128
+
+    BackupVerificationRecord:
+      type: object
+      required: [id, destination, app, stamp, status, started_at, checked_operations, skipped_count, files, bytes]
+      properties:
+        id:
+          type: string
+        destination:
+          type: string
+        app:
+          type: string
+        stamp:
+          type: string
+        status:
+          type: string
+          description: |-
+            One of running, passed, failed, cancelled, interrupted, not_verifiable.
+            Cancelled and interrupted are not a result, neither a pass nor a failure.
+            Not verifiable means the backup is bigger than the limits.
+            Kept as a string to preserve existing generated enum names.
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        checked_operations:
+          type: integer
+          minimum: 0
+        skipped_count:
+          type: integer
+          minimum: 0
+        files:
+          type: integer
+          format: int64
+          minimum: 0
+        bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        error:
+          type: string
+          description: A safe failure explanation, never transport credentials.
+
+    BackupVerificationSchedule:
+      type: object
+      required: [enabled, every_days, at]
+      properties:
+        enabled:
+          type: boolean
+          default: false
+        every_days:
+          type: integer
+          minimum: 1
+          maximum: 30
+          default: 7
+        at:
+          type: string
+          description: Local time of day, HH:MM.
+          example: "03:00"
+        last_run:
+          type: string
+          format: date-time
+          readOnly: true
+
+    BackupForceTarget:
+      type: object
+      required: [app, destination]
+      properties:
+        app:
+          type: string
+        destination:
+          type: string
+
+    BackupForceRefusal:
+      type: object
+      required: [app, destination, reason]
+      properties:
+        app:
+          type: string
+        destination:
+          type: string
+        reason:
+          type: string
+
+    BackupForceResult:
+      type: object
+      required: [started, refused]
+      properties:
+        started:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupForceTarget"
+        refused:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupForceRefusal"
 
     BackupRunRecord:
       properties:

@@ -159,3 +159,119 @@ func TestDueSchedulesAnswerInAStableOrder(t *testing.T) {
 		}
 	}
 }
+
+// inParis makes the box's zone Paris for one test, because the slots are wall-clock
+// times and a DST change only exists in a zone that has one.
+func inParis(t *testing.T) *time.Location {
+	t.Helper()
+
+	paris, err := time.LoadLocation("Europe/Paris")
+	if err != nil {
+		t.Skipf("no tz database: %v", err)
+	}
+
+	was := time.Local
+	time.Local = paris
+	t.Cleanup(func() { time.Local = was })
+
+	return paris
+}
+
+func TestADailyScheduleSaysItsLastAndNextSlot(t *testing.T) {
+	paris := inParis(t)
+	now := time.Date(2026, 9, 9, 7, 0, 0, 0, paris)
+
+	last, next, err := ScheduleSlots(daily(time.Time{}), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := time.Date(2026, 9, 9, 3, 0, 0, 0, paris); !last.Equal(want) {
+		t.Fatalf("last %v, want %v", last, want)
+	}
+	if want := time.Date(2026, 9, 10, 3, 0, 0, 0, paris); !next.Equal(want) {
+		t.Fatalf("next %v, want %v", next, want)
+	}
+}
+
+func TestAWeeklyScheduleSaysItsLastAndNextSlot(t *testing.T) {
+	paris := inParis(t)
+	// a Wednesday, on a schedule for Mondays
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, paris)
+	schedule := BackupSchedule{Every: ScheduleWeekly, Weekday: time.Monday, At: "03:00", Enabled: true}
+
+	last, next, err := ScheduleSlots(schedule, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := time.Date(2026, 9, 7, 3, 0, 0, 0, paris); !last.Equal(want) {
+		t.Fatalf("last %v, want %v", last, want)
+	}
+	if want := time.Date(2026, 9, 14, 3, 0, 0, 0, paris); !next.Equal(want) {
+		t.Fatalf("next %v, want %v", next, want)
+	}
+}
+
+func TestSlotsOfAnUnreadableTimeOfDayAreAnError(t *testing.T) {
+	inParis(t)
+
+	schedule := daily(time.Time{})
+	schedule.At = "three"
+
+	if _, _, err := ScheduleSlots(schedule, at(10, 7, 0)); err == nil {
+		t.Fatal("want an error")
+	}
+}
+
+// The slot is a wall-clock time. The night the clocks go forward is 23 hours long,
+// and "03:00 tomorrow" is still 03:00 on the wall, not 04:00.
+func TestTheNextSlotKeepsTheWallClockAcrossDST(t *testing.T) {
+	paris := inParis(t)
+	now := time.Date(2026, 3, 28, 7, 0, 0, 0, paris) // the day before spring-forward
+
+	last, next, err := ScheduleSlots(daily(time.Time{}), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := time.Date(2026, 3, 29, 3, 0, 0, 0, paris); !next.Equal(want) {
+		t.Fatalf("next %v, want %v", next, want)
+	}
+	if next.Sub(last) != 23*time.Hour {
+		t.Fatalf("the day is %v long, want 23h", next.Sub(last))
+	}
+}
+
+// 02:30 does not exist on 2026-03-29 in Paris. Whatever Go makes of it, the slot
+// has to stay on that calendar day, and the days around it must not inherit the
+// shifted hour.
+func TestASlotInTheHourThatDoesNotExistStaysOnItsDay(t *testing.T) {
+	paris := inParis(t)
+	schedule := daily(time.Time{})
+	schedule.At = "02:30"
+
+	// after the missing hour: the slot of the day itself
+	last, next, err := ScheduleSlots(schedule, time.Date(2026, 3, 29, 12, 0, 0, 0, paris))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if y, m, d := last.Date(); y != 2026 || m != 3 || d != 29 {
+		t.Fatalf("last %v is not on the 29th", last)
+	}
+	if want := time.Date(2026, 3, 30, 2, 30, 0, 0, paris); !next.Equal(want) {
+		t.Fatalf("next %v, want %v", next, want)
+	}
+
+	// before it: the slot of the day before, at its own 02:30, and the next one on the 29th
+	last, next, err = ScheduleSlots(schedule, time.Date(2026, 3, 29, 1, 0, 0, 0, paris))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2026, 3, 28, 2, 30, 0, 0, paris); !last.Equal(want) {
+		t.Fatalf("last %v, want %v", last, want)
+	}
+	if y, m, d := next.Date(); y != 2026 || m != 3 || d != 29 {
+		t.Fatalf("next %v is not on the 29th", next)
+	}
+}

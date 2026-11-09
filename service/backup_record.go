@@ -41,7 +41,7 @@ func finishBackupRecord(record *BackupRunRecord, manifest BackupManifest, err er
 // read what would be written. The record says whether the app was stopped as the
 // run did it, not as it was asked: an app that answers DNS is copied running.
 func finishBackupRecordWith(record *BackupRunRecord, manifest BackupManifest, err error, write func(BackupRunRecord) error) {
-	record.FinishedAt = time.Now()
+	record.FinishedAt = backupClock()
 	if !record.Restore {
 		record.ContainersStopped = manifest.ContainersStopped
 	}

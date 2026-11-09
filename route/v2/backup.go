@@ -2,12 +2,15 @@ package v2
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ReCasaOS/CasaOS-AppManagement/codegen"
@@ -344,9 +347,10 @@ func (a *AppManagement) BackupSchedules(ctx echo.Context) error {
 		return backupError(ctx, err)
 	}
 
+	now := time.Now()
 	out := make([]codegen.BackupSchedule, 0, len(schedules))
 	for _, schedule := range schedules {
-		out = append(out, toCodegenSchedule(schedule))
+		out = append(out, toCodegenSchedule(schedule, now))
 	}
 
 	return ctx.JSON(http.StatusOK, codegen.BackupSchedulesOK{
@@ -400,6 +404,60 @@ func (a *AppManagement) SetBackupSchedules(ctx echo.Context) error {
 	})
 }
 
+// ForceBackupSchedules runs the enabled schedules now, or those the body narrows to, and
+// answers once they have started: 202 when one did, 409 when none could, 404 when none matched.
+func (a *AppManagement) ForceBackupSchedules(ctx echo.Context) error {
+	var body codegen.ForceBackupSchedulesJSONBody
+	if err := ctx.Bind(&body); err != nil {
+		message := err.Error()
+		return ctx.JSON(http.StatusBadRequest, codegen.ResponseBadRequest{Message: &message})
+	}
+
+	request := service.ForceRequest{}
+	for _, field := range []struct{ from, into *string }{{body.App, &request.App}, {body.Destination, &request.Destination}} {
+		if field.from == nil {
+			continue
+		}
+		if *field.from == "" {
+			return ctx.JSON(http.StatusBadRequest, codegen.ResponseBadRequest{
+				Message: utils.Ptr("app and destination, when given, cannot be empty"),
+			})
+		}
+		*field.into = *field.from
+	}
+
+	result, err := service.ForceSchedules(ctx.Request().Context(), request, service.NewScheduledBackupRunner())
+	if errors.Is(err, service.ErrNoSuchSchedule) {
+		return ctx.JSON(http.StatusNotFound, codegen.ResponseNotFound{Message: utils.Ptr(err.Error())})
+	}
+	if err != nil && !errors.Is(err, service.ErrUpgradeOpen) {
+		return backupError(ctx, err)
+	}
+
+	data := codegen.BackupForceResult{Started: []codegen.BackupForceTarget{}, Refused: []codegen.BackupForceRefusal{}}
+	for _, schedule := range result.Started {
+		data.Started = append(data.Started, codegen.BackupForceTarget{App: schedule.App, Destination: schedule.Destination})
+	}
+	reasons := []string{}
+	for _, refusal := range result.Refused {
+		data.Refused = append(data.Refused, codegen.BackupForceRefusal(refusal))
+		reasons = append(reasons, fmt.Sprintf("%s to %s: %s", refusal.App, refusal.Destination, refusal.Reason))
+	}
+
+	switch {
+	case err != nil:
+		return ctx.JSON(http.StatusConflict, codegen.BackupForceOK{Message: utils.Ptr(err.Error()), Data: &data})
+	case len(data.Started) == 0:
+		return ctx.JSON(http.StatusConflict, codegen.BackupForceOK{
+			Message: utils.Ptr("nothing started: " + strings.Join(reasons, "; ")), Data: &data,
+		})
+	}
+
+	return ctx.JSON(http.StatusAccepted, codegen.BackupForceOK{
+		Message: utils.Ptr(fmt.Sprintf("%d backup(s) started", len(data.Started))), Data: &data,
+	})
+}
+
 // BackupRuns is what happened, newest first, failures included.
 func (a *AppManagement) BackupRuns(ctx echo.Context) error {
 	records, err := service.BackupRuns()
@@ -417,18 +475,28 @@ func (a *AppManagement) BackupRuns(ctx echo.Context) error {
 	})
 }
 
-func toCodegenSchedule(schedule service.BackupSchedule) codegen.BackupSchedule {
+func toCodegenSchedule(schedule service.BackupSchedule, now time.Time) codegen.BackupSchedule {
 	weekday := int(schedule.Weekday)
 	every := string(schedule.Every)
 	lastRun := schedule.LastRun
 
-	return codegen.BackupSchedule{
+	out := codegen.BackupSchedule{
 		App: schedule.App, Destination: schedule.Destination,
 		Every: codegen.BackupScheduleEvery(every), At: schedule.At,
 		Weekday: &weekday, Keep: &schedule.Keep,
 		HoldStill: &schedule.HoldStill, Enabled: &schedule.Enabled,
 		LastRun: &lastRun,
 	}
+
+	// An unreadable time of day leaves the slots out: a listing that fails for one
+	// bad schedule hides all the others (the scheduler reports the bad one).
+	if schedule.Enabled {
+		if last, next, err := service.ScheduleSlots(schedule, now); err == nil {
+			out.LastSlot, out.NextSlot = &last, &next
+		}
+	}
+
+	return out
 }
 
 func fromCodegenSchedule(item codegen.BackupSchedule) service.BackupSchedule {
@@ -739,4 +807,53 @@ func signInError(ctx echo.Context, err error) error {
 	}
 
 	return backupError(ctx, err)
+}
+
+// BackupVerificationSchedule says when the newest backups are read back by themselves.
+func (a *AppManagement) BackupVerificationSchedule(ctx echo.Context) error {
+	v, err := service.GetVerificationSchedule()
+	if err != nil {
+		return backupError(ctx, err)
+	}
+
+	return ctx.JSON(http.StatusOK, codegen.BackupVerificationScheduleOK{Data: verificationScheduleOut(v)})
+}
+
+// SetBackupVerificationSchedule saves it. The body is read strictly: a misspelt field would
+// otherwise save a default nobody chose. A last_run sent is the box's to keep and is ignored.
+func (a *AppManagement) SetBackupVerificationSchedule(ctx echo.Context) error {
+	var body struct {
+		Enabled   *bool           `json:"enabled"`
+		EveryDays *int            `json:"every_days"`
+		At        *string         `json:"at"`
+		LastRun   json.RawMessage `json:"last_run"`
+	}
+	decoder := json.NewDecoder(ctx.Request().Body)
+	decoder.DisallowUnknownFields()
+	err := decoder.Decode(&body)
+	if err == nil && decoder.Decode(&struct{}{}) != io.EOF {
+		err = errors.New("trailing data")
+	}
+	if err != nil || body.Enabled == nil || body.EveryDays == nil || body.At == nil {
+		return backupBadRequest(ctx, errors.New("a verification schedule is JSON with enabled, every_days and at"))
+	}
+
+	err = service.SetVerificationSchedule(service.VerificationSchedule{Enabled: *body.Enabled, EveryDays: *body.EveryDays, At: *body.At})
+	if errors.Is(err, service.ErrInvalidVerificationSchedule) {
+		return backupBadRequest(ctx, err)
+	}
+	if err != nil {
+		return backupError(ctx, err)
+	}
+
+	return a.BackupVerificationSchedule(ctx)
+}
+
+func verificationScheduleOut(v service.VerificationSchedule) *codegen.BackupVerificationSchedule {
+	out := &codegen.BackupVerificationSchedule{Enabled: v.Enabled, EveryDays: v.EveryDays, At: v.At}
+	if !v.LastRun.IsZero() {
+		out.LastRun = &v.LastRun
+	}
+
+	return out
 }

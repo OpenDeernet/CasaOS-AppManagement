@@ -79,12 +79,20 @@ func mostRecentSlot(schedule BackupSchedule, now time.Time) (time.Time, error) {
 		return time.Time{}, err
 	}
 
-	slot := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
+	// Every slot is built from its calendar day and the wall-clock time, never by
+	// adding days to another slot: on the night the clocks go forward "02:30" does
+	// not exist, comes out as 03:30, and AddDate would carry that hour to every
+	// other day.
+	slotOn := func(daysFromToday int) time.Time {
+		return time.Date(now.Year(), now.Month(), now.Day()+daysFromToday, hour, minute, 0, 0, now.Location())
+	}
+
+	slot := slotOn(0)
 
 	switch schedule.Every {
 	case ScheduleDaily:
 		if slot.After(now) {
-			slot = slot.AddDate(0, 0, -1)
+			slot = slotOn(-1)
 		}
 
 		return slot, nil
@@ -92,15 +100,37 @@ func mostRecentSlot(schedule BackupSchedule, now time.Time) (time.Time, error) {
 	case ScheduleWeekly:
 		// step back to the chosen weekday
 		back := (int(slot.Weekday()) - int(schedule.Weekday) + 7) % 7
-		slot = slot.AddDate(0, 0, -back)
+		slot = slotOn(-back)
 		if slot.After(now) {
-			slot = slot.AddDate(0, 0, -7)
+			slot = slotOn(-back - 7)
 		}
 
 		return slot, nil
 	}
 
 	return time.Time{}, fmt.Errorf("%q is not a frequency this understands", schedule.Every)
+}
+
+// ScheduleSlots is the last slot a schedule was due at, and the one after it.
+func ScheduleSlots(schedule BackupSchedule, now time.Time) (last, next time.Time, err error) {
+	last, err = mostRecentSlot(schedule, now)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+
+	// already read once by mostRecentSlot
+	hour, minute, _ := parseAt(schedule.At)
+
+	days := 1
+	if schedule.Every == ScheduleWeekly {
+		days = 7
+	}
+
+	// The calendar day plus the wall-clock time, not last.AddDate: when last is the
+	// shifted slot of the missing hour, AddDate would carry the shift forward.
+	next = time.Date(last.Year(), last.Month(), last.Day()+days, hour, minute, 0, 0, last.Location())
+
+	return last, next, nil
 }
 
 // IsDue reports whether this schedule has a slot it has not run yet.

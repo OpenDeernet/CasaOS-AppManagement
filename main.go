@@ -16,6 +16,7 @@ import (
 
 	"github.com/ReCasaOS/CasaOS-AppManagement/common"
 	"github.com/ReCasaOS/CasaOS-AppManagement/pkg/config"
+	"github.com/ReCasaOS/CasaOS-AppManagement/pkg/rclone"
 	"github.com/ReCasaOS/CasaOS-AppManagement/route"
 	v1 "github.com/ReCasaOS/CasaOS-AppManagement/route/v1"
 	"github.com/ReCasaOS/CasaOS-AppManagement/service"
@@ -171,6 +172,15 @@ func main() {
 		backupRunner := service.NewScheduledBackupRunner()
 		if _, err := crontab.AddFunc("@every 1m", func() {
 			service.RunDueBackups(ctx, time.Now(), backupRunner)
+		}); err != nil {
+			panic(err)
+		}
+
+		// The newest backups read back, every few days, when the owner switched it on. A job of
+		// its own, so a verification -- up to an hour each -- never holds up the backups' tick;
+		// the tour takes a lock of its own, as cron starts one a minute whether the last ended.
+		if _, err := crontab.AddFunc("@every 1m", func() {
+			service.RunDueVerifications(ctx, time.Now(), rclone.NewClient())
 		}); err != nil {
 			panic(err)
 		}

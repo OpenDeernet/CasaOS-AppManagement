@@ -104,7 +104,7 @@ type backupRunner interface {
 //
 // While an operating system upgrade is open nothing runs and nothing is recorded: the
 // slot stays unrun, so what was skipped runs once when the upgrade is closed. The tick
-// says so in one line.
+// says so in one line, at most once an hour.
 func RunDueBackups(ctx context.Context, now time.Time, runner backupRunner) {
 	// ponytail: one tick for the whole box, so a long backup holds up the slots that fall due
 	// behind it; a tick per destination if that is ever felt.
@@ -133,14 +133,20 @@ func RunDueBackups(ctx context.Context, now time.Time, runner backupRunner) {
 		// asks what runs, so with this order one of the two always sees the other; a backup
 		// that looked first and listed itself after could be seen by neither, and run through
 		// the whole upgrade.
-		listed := markInProgress(schedule.App, "backup")
+		listed, ok := markUnlessForced(schedule.App, schedule.Destination)
+		if !ok {
+			// a force runs it now; its slot stays unrun for the next tick, and nothing is recorded
+			continue
+		}
 
 		// Asked before each backup and not once for the tick: a tick can hold hours of
 		// backups, and the upgrade can open between two of them.
 		if open, err := osUpgradeOpen(); open {
 			listed()
-			logHeldForUpgrade("backups are waiting: an operating system upgrade is open, or whether one is cannot be told",
-				zap.Int("waiting", len(due)-done), zap.Error(err))
+			if holdNoticeDue() {
+				logHeldForUpgrade("backups are waiting: an operating system upgrade is open, or whether one is cannot be told",
+					zap.Int("waiting", len(due)-done), zap.Error(err))
+			}
 
 			break
 		}
@@ -158,6 +164,33 @@ func RunDueBackups(ctx context.Context, now time.Time, runner backupRunner) {
 
 // backupTick is held by the tick that is running: see RunDueBackups.
 var backupTick sync.Mutex
+
+// backupClock is the one clock a run's own times and the tick's hold notice are read from, a
+// variable so a test can move it while a fake backup "runs". The tick's `now` is not it: that is
+// when the tick began, which for the second backup of a tick can be hours before it did.
+var backupClock = time.Now
+
+// lastUpgradeHoldLog is when the tick last said backups were waiting for an upgrade.
+var (
+	lastUpgradeHoldLog   time.Time
+	lastUpgradeHoldLogMu sync.Mutex
+)
+
+// holdNoticeDue says whether the tick should say it is holding backups back, and counts it as
+// said. Once an hour: a hold can last days, and a line a minute buries the reason in the journal.
+func holdNoticeDue() bool {
+	lastUpgradeHoldLogMu.Lock()
+	defer lastUpgradeHoldLogMu.Unlock()
+
+	now := backupClock()
+	if !lastUpgradeHoldLog.IsZero() && now.Sub(lastUpgradeHoldLog) < time.Hour {
+		return false
+	}
+
+	lastUpgradeHoldLog = now
+
+	return true
+}
 
 // recordBackupRun writes down that a schedule's slot is spent, in the file as it is now. The
 // owner may have saved the schedules while the backup ran, and the list the tick read when it
@@ -180,11 +213,13 @@ func recordBackupRun(schedule BackupSchedule, now time.Time) error {
 	return writeSchedules(schedules)
 }
 
+// runScheduled takes the tick's `now` for the backup's stamp (the slot it answers) and the clock
+// for when it began: a tick chains backups, and the second begins hours after the tick did.
 func runScheduled(ctx context.Context, now time.Time, schedule BackupSchedule, runner backupRunner) {
 	stamp := now.UTC().Format("2006-01-02T15-04-05Z")
 	record := BackupRunRecord{
 		App: schedule.App, Destination: schedule.Destination, Stamp: stamp,
-		StartedAt: now, Scheduled: true, ContainersStopped: schedule.HoldStill,
+		StartedAt: backupClock(), Scheduled: true, ContainersStopped: schedule.HoldStill,
 	}
 
 	manifest, err := runner.Run(ctx, schedule, stamp)

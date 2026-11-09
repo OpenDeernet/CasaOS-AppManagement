@@ -191,3 +191,12 @@ func handOver(app, kind string) {
 		appOperations.running[app] = kind
 	}
 }
+
+// appOperationRunning says whether an operation of this kind runs on app, held or marked:
+// RunningOperations shows one kind per app, which can hide it.
+func appOperationRunning(app, kind string) bool {
+	appOperations.Lock()
+	defer appOperations.Unlock()
+
+	return appOperations.running[app] == kind || slices.Contains(appOperations.marked[app], kind)
+}

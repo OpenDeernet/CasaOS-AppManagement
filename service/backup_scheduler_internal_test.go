@@ -219,3 +219,71 @@ func TestNoSchedulesAtAll(t *testing.T) {
 		t.Fatal("nothing to run")
 	}
 }
+
+// clockAt puts backupClock where a test says, and restores it.
+func clockAt(t *testing.T, now time.Time) *time.Time {
+	t.Helper()
+
+	clock := now
+	was := backupClock
+	backupClock = func() time.Time { return clock }
+	t.Cleanup(func() { backupClock = was })
+
+	return &clock
+}
+
+// slowRunner takes `took` of the test's clock for each backup, as a real one takes real time.
+type slowRunner struct {
+	fakeRunner
+	clock *time.Time
+	took  time.Duration
+}
+
+func (s *slowRunner) Run(ctx context.Context, schedule BackupSchedule, stamp string) (BackupManifest, error) {
+	*s.clock = s.clock.Add(s.took)
+
+	return s.fakeRunner.Run(ctx, schedule, stamp)
+}
+
+// A tick that chains backups started the second one hours after the tick began. Its record said
+// it began with the tick, so the Health strip showed one long "batch" ("4 h 04" for two backups).
+// The slot spent is still the tick's: LastRun is what DueSchedules compares against.
+func TestScheduledRunsRecordTheirOwnStart(t *testing.T) {
+	schedulerInTempDir(t)
+
+	tick := at(10, 7, 0)
+	clock := clockAt(t, tick)
+
+	_ = SaveBackupSchedules(threeDue()[:2]) // immich, then jellyfin
+
+	runner := &slowRunner{clock: clock, took: 2 * time.Hour}
+	RunDueBackups(context.Background(), tick, runner)
+
+	if len(runner.ran) != 2 {
+		t.Fatalf("both ran: %v", runner.ran)
+	}
+
+	byApp := map[string]BackupRunRecord{}
+	records, _ := BackupRuns()
+	for _, record := range records {
+		byApp[record.App] = record
+	}
+
+	first, second := byApp["immich"], byApp["jellyfin"]
+	if !first.StartedAt.Equal(tick) {
+		t.Fatalf("the first begins with the tick: %v", first.StartedAt)
+	}
+	if want := tick.Add(2 * time.Hour); !second.StartedAt.Equal(want) {
+		t.Fatalf("the second begins when it began, %v, not when the tick did: %v", want, second.StartedAt)
+	}
+	if took := second.FinishedAt.Sub(second.StartedAt); took != 2*time.Hour {
+		t.Fatalf("its duration is its own, not the tick's so far: %v", took)
+	}
+
+	schedules, _ := BackupSchedules()
+	for _, schedule := range schedules {
+		if !schedule.LastRun.Equal(tick) {
+			t.Fatalf("%s: the spent slot is the tick's: %v", schedule.App, schedule.LastRun)
+		}
+	}
+}

@@ -77,3 +77,43 @@ func TestEveryFieldOfARunReachesTheAPI(t *testing.T) {
 		t.Fatalf("a field was dropped on the way out -- service: %v -- api: %v", want, got)
 	}
 }
+
+// An enabled schedule says when it last and next goes off, with the box's UTC
+// offset so the interface does not have to guess the zone; a disabled one, or one
+// whose time of day cannot be read, says nothing rather than failing the listing.
+func TestSchedulesSayTheirSlots(t *testing.T) {
+	paris, err := time.LoadLocation("Europe/Paris")
+	if err != nil {
+		t.Skipf("no tz database: %v", err)
+	}
+	now := time.Date(2026, 9, 9, 7, 0, 0, 0, paris)
+
+	schedule := service.BackupSchedule{
+		App: "nextcloud", Destination: "offsite",
+		Every: service.ScheduleDaily, At: "03:00", Enabled: true,
+	}
+
+	out := toCodegenSchedule(schedule, now)
+	if out.LastSlot == nil || out.NextSlot == nil {
+		t.Fatalf("an enabled schedule gave %v and %v", out.LastSlot, out.NextSlot)
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"last_slot":"2026-09-09T03:00:00+02:00"`, `"next_slot":"2026-09-10T03:00:00+02:00"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("%s lacks %s", raw, want)
+		}
+	}
+
+	schedule.Enabled = false
+	if out := toCodegenSchedule(schedule, now); out.LastSlot != nil || out.NextSlot != nil {
+		t.Fatalf("a disabled schedule gave %v and %v", out.LastSlot, out.NextSlot)
+	}
+
+	schedule.Enabled, schedule.At = true, "three"
+	if out := toCodegenSchedule(schedule, now); out.LastSlot != nil || out.NextSlot != nil {
+		t.Fatalf("an unreadable schedule gave %v and %v", out.LastSlot, out.NextSlot)
+	}
+}

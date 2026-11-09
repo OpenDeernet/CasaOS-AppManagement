@@ -35,8 +35,11 @@ func TestTheBoxIsAFixedListAndAbsentPartsAreSkippedWithAReason(t *testing.T) {
 	if len(manifest.Operations) != 3 {
 		t.Fatalf("three present: %+v", manifest.Operations)
 	}
-	if len(manifest.Skipped) != 3 || !strings.Contains(manifest.Skipped[0].Skip, "not present") {
-		t.Fatalf("three absent, with the reason: %+v", manifest.Skipped)
+	if len(manifest.Skipped) != 4 || !strings.Contains(manifest.Skipped[0].Skip, "not present") {
+		t.Fatalf("four absent, with the reason: %+v", manifest.Skipped)
+	}
+	if last := manifest.Skipped[len(manifest.Skipped)-1]; last.Path != VerificationSchedulePath {
+		t.Fatalf("the verification schedule is part of the box: %+v", manifest.Skipped)
 	}
 	for _, op := range manifest.Operations {
 		if op.Kind != BackupKindBind || !strings.HasPrefix(op.Destination, "binds/") {
@@ -112,8 +115,8 @@ func TestABoxRestoreUsesThisBoxesPathsAndRestartsRcloneLast(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(report.Restored) != len(systemBackupPaths()) {
-		t.Fatalf("everything the backup held: %+v", report)
+	if len(report.Restored) != len(systemBackupPaths()) || report.Restored[len(report.Restored)-1].Source != VerificationSchedulePath {
+		t.Fatalf("everything the backup held, the verification schedule included: %+v", report)
 	}
 	for _, call := range restorer.restored {
 		if strings.HasPrefix(call.host, "/elsewhere") {
@@ -151,7 +154,7 @@ func TestABackupOfAnAppIsNotPouredIntoTheBox(t *testing.T) {
 func TestEachPartOfTheBoxGoesBackToItsOwnPathWhateverNumberItLandedUnder(t *testing.T) {
 	logInTempDir(t)
 
-	// taken on a box with no Samba config: five parts, numbered 1..5
+	// taken on a box with no Samba config: six parts, numbered 1..6
 	present := func(p string) bool { return p != "/etc/samba/smb.casa.conf" }
 	manifest := PlanBackup(SystemBackupName, SystemBackupInventory(present), nil)
 	for i := range manifest.Operations {
@@ -166,8 +169,8 @@ func TestEachPartOfTheBoxGoesBackToItsOwnPathWhateverNumberItLandedUnder(t *test
 		t.Fatal(err)
 	}
 
-	if len(report.Restored) != 5 || len(report.Missing) != 0 {
-		t.Fatalf("five parts back, nothing missing: %+v", report)
+	if len(report.Restored) != 6 || len(report.Missing) != 0 {
+		t.Fatalf("six parts back, nothing missing: %+v", report)
 	}
 	for _, call := range restorer.restored {
 		// binds/2 in this backup is the database folder, and it must land there

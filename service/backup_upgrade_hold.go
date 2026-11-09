@@ -55,6 +55,9 @@ func osUpgradeOpen() (open bool, err error) {
 	return true, err
 }
 
+// OSUpgradeOpen is osUpgradeOpen for the API, which tells the core's master whether backups wait.
+func OSUpgradeOpen() (bool, error) { return osUpgradeOpen() }
+
 // heldForUpgrade is osUpgradeOpen for what a git app does by itself: when it says yes, it also
 // says in the log what waits, with fields to tell which.
 func heldForUpgrade(what string, fields ...zap.Field) bool {

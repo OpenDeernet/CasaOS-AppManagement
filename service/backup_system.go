@@ -63,10 +63,11 @@ func (systemdControl) Restart(unit string) error {
 // Systemd is the real thing.
 func Systemd() unitControl { return systemdControl{} }
 
-// systemBackupPaths is systemPaths and the backup schedules, whose file follows
-// the data path, so it is read at the moment of the backup, not fixed.
+// systemBackupPaths is systemPaths, the backup schedules and the verification schedule, whose
+// files are variables (the schedules' follows the data path), so they are read at the moment
+// of the backup, not fixed.
 func systemBackupPaths() []string {
-	return append(slices.Clone(systemPaths), BackupSchedulePath)
+	return append(slices.Clone(systemPaths), BackupSchedulePath, VerificationSchedulePath)
 }
 
 // SystemBackupInventory lists what the box is, as backup entries.

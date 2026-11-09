@@ -2,6 +2,7 @@ package rclone
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
@@ -27,6 +28,8 @@ type JobStatus struct {
 	Success  bool    `json:"success"`
 	Error    string  `json:"error"`
 	Duration float64 `json:"duration"`
+	// Output is the endpoint's own answer, which can say failure while the job succeeds.
+	Output json.RawMessage `json:"output"`
 }
 
 // startJob asks for an async call and returns the job number.

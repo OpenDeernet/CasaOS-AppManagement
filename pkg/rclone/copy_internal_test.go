@@ -210,3 +210,31 @@ func TestPurgingOneRun(t *testing.T) {
 		t.Fatalf("one run, not the app: fs=%q remote=%q", form.Get("fs"), form.Get("remote"))
 	}
 }
+
+// A caller that gives up must hear that it gave up, not that the daemon is gone:
+// the two lead to different decisions about a job that may still be running.
+func TestCallContextReportsTheCancellationNotTheDaemon(t *testing.T) {
+	client, _ := serverFor(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := client.callContext(ctx, "/rc/noop", nil, nil)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrDaemonUnreachable) {
+		t.Fatalf("got %v, want the cancellation", err)
+	}
+}
+
+// Some endpoints (operations/check, operations/size) put their answer in the job's
+// output, while the job itself succeeds whatever that answer is.
+func TestJobStatusCarriesTheEndpointOutput(t *testing.T) {
+	client, _ := serverFor(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":4,"finished":true,"success":true,"output":{"success":false}}`))
+	})
+
+	status, err := client.JobStatus(4)
+	if err != nil || string(status.Output) != `{"success":false}` {
+		t.Fatalf("output lost: %q %v", status.Output, err)
+	}
+}

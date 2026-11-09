@@ -16,5 +16,11 @@ func (a *AppManagement) AppOperations(ctx echo.Context) error {
 		operations = append(operations, codegen.AppOperation{App: operation.App, Kind: operation.Kind})
 	}
 
-	return ctx.JSON(http.StatusOK, codegen.AppOperationsOK{Operations: operations})
+	// an upgrade that cannot be ruled out is told as open, as the scheduler reads it
+	open, _ := osUpgradeOpen()
+
+	return ctx.JSON(http.StatusOK, codegen.AppOperationsOK{Operations: operations, OsUpgradeOpen: open})
 }
+
+// osUpgradeOpen is a variable so a test can open an upgrade without the core's file.
+var osUpgradeOpen = service.OSUpgradeOpen
