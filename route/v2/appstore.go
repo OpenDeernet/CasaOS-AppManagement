@@ -2,7 +2,6 @@ package v2
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -400,6 +399,16 @@ func FilterCatalogByArchitecture(catalog map[string]*service.ComposeApp, arch st
 	})
 }
 
+
+func upgradableAppTitle(storeInfo *codegen.ComposeAppStoreInfo, fallback string) string {
+	if storeInfo != nil {
+		if t := storeInfo.Title[common.DefaultLanguage]; t != "" {
+			return t
+		}
+	}
+	return fallback
+}
+
 func (a *AppManagement) UpgradableAppList(ctx echo.Context) error {
 	composeApps, err := service.MyService.Compose().List(ctx.Request().Context())
 
@@ -419,10 +428,9 @@ func (a *AppManagement) UpgradableAppList(ctx echo.Context) error {
 			continue
 		}
 
-		title, err := json.Marshal(storeInfo.Title)
-		if err != nil {
-			title = []byte("unknown")
-		}
+		// Title is an i18n map; the upgradable list API exposes a plain string.
+		// Marshalling the map used to put JSON object text in the field (e.g. {"en_us":"Nextcloud"}).
+		title := upgradableAppTitle(storeInfo, composeApp.Name)
 
 		storeComposeApp, err := service.MyService.AppStoreManagement().ComposeApp(id)
 		if err != nil || storeComposeApp == nil {
@@ -455,7 +463,7 @@ func (a *AppManagement) UpgradableAppList(ctx echo.Context) error {
 
 		if service.MyService.AppStoreManagement().IsUpdateAvailable(composeApp) {
 			upgradableAppList = append(upgradableAppList, codegen.UpgradableAppInfo{
-				Title:      string(title),
+				Title:      title,
 				Version:    targetTag,
 				StoreAppID: lo.ToPtr(id),
 				Status:     status,
