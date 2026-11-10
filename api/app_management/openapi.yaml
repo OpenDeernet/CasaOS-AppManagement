@@ -3922,7 +3922,7 @@ components:
       properties:
         title:
           type: string
-          example: "{en_US:\"Syncthing\"}"
+          example: "Syncthing"
         version:
           description: current version of the installed app
           type: string
